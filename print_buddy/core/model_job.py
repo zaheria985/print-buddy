@@ -284,6 +284,69 @@ def model_info_output(path):
     return info
 
 
+def mesh_topology(triangles):
+    """Conservative indexed-by-position topology summary; does not repair geometry."""
+    vertices = {}
+    faces = []
+    degenerate = 0
+    for tri in triangles:
+        ids = []
+        for point in tri:
+            key = tuple(round(float(v), 6) for v in point)
+            ids.append(vertices.setdefault(key, len(vertices)))
+        if len(set(ids)) < 3:
+            degenerate += 1
+        faces.append(ids)
+    edges = {}
+    adjacency = [[] for _ in faces]
+    for fi, face in enumerate(faces):
+        for a, b in zip(face, face[1:] + face[:1]):
+            key = (min(a, b), max(a, b))
+            edges.setdefault(key, []).append((fi, a < b))
+    for uses in edges.values():
+        for fi, _ in uses:
+            for other, _ in uses:
+                if fi != other:
+                    adjacency[fi].append(other)
+    seen = set()
+    shells = 0
+    for start in range(len(faces)):
+        if start in seen:
+            continue
+        shells += 1
+        stack = [start]
+        seen.add(start)
+        while stack:
+            current = stack.pop()
+            for other in adjacency[current]:
+                if other not in seen:
+                    seen.add(other)
+                    stack.append(other)
+    boundary = sum(len(uses) == 1 for uses in edges.values())
+    nonmanifold = sum(len(uses) > 2 for uses in edges.values())
+    winding = sum(len(uses) == 2 and uses[0][1] == uses[1][1] for uses in edges.values())
+    incident = {}
+    for edge, uses in edges.items():
+        for vertex in edge:
+            incident.setdefault(vertex, []).append(len(uses))
+    singular = sum(any(count != 2 for count in counts) for counts in incident.values())
+    manifold = not (boundary or nonmanifold or singular or degenerate or winding)
+    return {"triangle_count": len(faces), "connected_shells": shells,
+            "boundary_edges": boundary, "non_manifold_edges": nonmanifold,
+            "singular_vertices": singular, "winding_inconsistencies": winding,
+            "degenerate_triangles": degenerate, "watertight": boundary == 0 and nonmanifold == 0,
+            "manifold": manifold}
+
+
+def mesh_audit(path):
+    """Read-only topology report for STL/3MF source geometry."""
+    from .orca_adapter import source_triangles
+    triangles = source_triangles(path)
+    if not triangles:
+        raise RuntimeError("model has no printable geometry")
+    return {"schema_version": 1, "sha256": file_sha256(path), **mesh_topology(triangles)}
+
+
 def audit(path):
     with open(path,"rb") as source:
         digest=hashlib.file_digest(source,"sha256").hexdigest()
@@ -314,7 +377,10 @@ def audit(path):
     manifest = inventory(path)
     out['color_manifest'] = manifest
     out['color_prompts'] = prompts(manifest)
-    # Independent geometry check reports actual extents/manifoldness.
+    try:
+        out["mesh_audit"] = mesh_audit(path)
+    except Exception as exc:
+        out["mesh_audit_error"] = str(exc)
     try:
         info = model_info_output(path)
     except Exception as exc:  # unreadable mesh: slice_job re-measures and refuses clearly
@@ -3360,6 +3426,8 @@ def _main():
         x.add_argument("--print-now",action="store_true",help="bed confirmed clear: start the print right after slicing")
         x.add_argument('--color-mode', choices=['per_part', 'single_color'])
         x.add_argument('--color-slot', type=int, action='append', help='slot for each displayed part/filament question, in order')
+    ma=sub.add_parser("audit",help="read-only mesh topology audit; no repair or slicing")
+    ma.add_argument("source")
     m=sub.add_parser("plate-manifest",help="read-only source plate inventory; does not authorize slicing")
     m.add_argument("source_3mf")
     r=sub.add_parser("record-start",help="after a confirmed print start: write the dated Obsidian note"); r.add_argument("gcode"); r.add_argument("--moonraker-name"); r.add_argument("--started-at",help="ISO UTC, default now")
@@ -3383,6 +3451,8 @@ def _main():
         print(json.dumps({'manifest': manifest, 'questions': prompts(manifest),
                           'decisions': job.get('color_decisions')}, indent=2))
         return
+    if a.cmd=="audit":
+        print(json.dumps(mesh_audit(a.source), indent=2)); return
     if a.cmd=="prepare-first-layer":
         prepare_first_layer(a.slot, a.color, a.material, a.spoolman_id, slicer=a.slicer); return
     if a.cmd=="plate-manifest":

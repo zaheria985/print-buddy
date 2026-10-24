@@ -104,6 +104,13 @@ class PrintBuddyBot(ext_commands.Bot):
                 item.cancel()
             else:
                 item.close()
+        tasks = [item for item in self._background if isinstance(item, asyncio.Task)]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for item in self._background:
+            if not isinstance(item, asyncio.Task):
+                await item.wait_closed()
+        self._background.clear()
         self.connected = False
         try:
             if self.core is not None:

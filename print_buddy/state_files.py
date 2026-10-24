@@ -28,6 +28,7 @@ KNOWN = (
     "ifs_presence_edges.json",
     "last_bot_cancel.json",
     "lifecycle_notifications.json",
+    "listener_health.json",
     "maintenance.json",
     "model-link-intakes",
     "moonraker_discord_announcements.json",

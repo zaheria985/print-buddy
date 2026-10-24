@@ -1,9 +1,9 @@
 # Docker defaults for Print Buddy. Override with PRINT_BUDDY__SECTION__KEY.
 # Legacy config/docker.toml remains supported when explicitly selected.
 orca:
-  # Extracted AppImage AppRun from the pinned v2.4.2 release
+  # Source-installed binary; requires WITH_ORCA=true at image build time
   command:
-    - /opt/orcaslicer/AppRun
+    - /usr/bin/orca-slicer
 bambu:
   # Not installed by default; override if you add the Bambu Studio binary
   command:
@@ -22,7 +22,7 @@ services:
   moonraker_url: ""
   moonraker_ws_url: ""
   camera_snapshot_url: ""
-  spoolman_url: http://spoolman:8000
+  spoolman_url: ""
   openviking_url: ""
   vision_chat_url: ""
   stock_api_port: 8898

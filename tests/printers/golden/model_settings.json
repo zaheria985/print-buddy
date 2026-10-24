@@ -1,0 +1,678 @@
+{
+  "flashforge.ad5x": {
+    "bambu": {
+      "command": [
+        "flatpak",
+        "run",
+        "--unshare=network",
+        "--command=bambu-studio",
+        "com.bambulab.BambuStudio"
+      ]
+    },
+    "bot": {
+      "health_port": 0,
+      "health_stale_s": 120,
+      "mode": "hermes",
+      "sync_commands": true
+    },
+    "cold_pull": {
+      "petg": [
+        245,
+        100
+      ],
+      "pla_trial": [
+        220,
+        90
+      ]
+    },
+    "discord": {
+      "allowed_user_ids": "",
+      "approval_user_id": "",
+      "bot_name": "Print Buddy",
+      "chat_id": "",
+      "cold_pull_outcome_s": 1800,
+      "daily_reset_hour": 4,
+      "post_print_quiet_s": 7200,
+      "question_timeout_s": 1800,
+      "safety_confirm_timeout_s": 600,
+      "timezone": "America/New_York",
+      "token_env": "DISCORD_BOT_TOKEN",
+      "upload_max_bytes": 9500000,
+      "upload_wait_s": 3600
+    },
+    "layout": {
+      "max_merged_hours": 12.0,
+      "merge_edge_margin_mm": 8.0,
+      "merge_spacing_mm": 10.0,
+      "multi_copy_edge_mm": 3.0,
+      "single_copy_edge_mm": 1.0
+    },
+    "listener": {
+      "ifs_presence_poll_s": 15,
+      "spool_nag_s": 600,
+      "start_claim_ttl_s": 1800,
+      "tick_s": 600
+    },
+    "llm": {
+      "api_key_env": "LLM_API_KEY",
+      "chat_url": "",
+      "model": "",
+      "timeout_s": 20.0
+    },
+    "maintenance": {
+      "full_days": 30,
+      "full_hours": 75,
+      "quick_hours": 25
+    },
+    "material_temps": {
+      "ABS": {
+        "bed": 100,
+        "nozzle": 245
+      },
+      "ASA": {
+        "bed": 105,
+        "nozzle": 260
+      },
+      "PA": {
+        "bed": 90,
+        "nozzle": 260
+      },
+      "PC": {
+        "bed": 110,
+        "nozzle": 275
+      },
+      "PETG": {
+        "bed": 85,
+        "nozzle": 240
+      },
+      "PLA": {
+        "bed": 60,
+        "nozzle": 210
+      },
+      "TPU": {
+        "bed": 50,
+        "nozzle": 230
+      }
+    },
+    "nozzle_temp_offsets": {
+      "brass": 0.0,
+      "diamond": 0.0,
+      "hardened_steel": 0.0,
+      "ruby": 0.0,
+      "stainless_steel": 0.0,
+      "tungsten_carbide": 0.0
+    },
+    "orca": {
+      "command": [
+        "flatpak",
+        "run",
+        "com.orcaslicer.OrcaSlicer"
+      ],
+      "templates": "<repo>/print_buddy/templates/orca/flashforge_ad5x"
+    },
+    "paths": {
+      "archive": "~/3d-prints",
+      "cache": "~/.hermes/cache",
+      "ffmpeg": "ffmpeg",
+      "hermes_agent": "~/.hermes/hermes-agent",
+      "hermes_bin": "~/.local/bin/hermes",
+      "hermes_home": "~/.hermes/profiles/3dprinting",
+      "hermes_restart_helper": "~/.hermes/skills/autonomous-ai-agents/hermes-safe-restart/scripts/restart_hermes.py",
+      "records_vault": "~/Documents/3D Printing Records"
+    },
+    "prime_tower": {
+      "edge_mm": 10.0,
+      "merge_slack_mm": 5.0,
+      "part_clearance_mm": 8.0,
+      "size_mm": 45.0
+    },
+    "printer": {
+      "bed_mm": [
+        220.0,
+        220.0
+      ],
+      "end_macro": "END_PRINT",
+      "firmware": "ZMod Klipper",
+      "ifs_slots": 4,
+      "max_print_height_mm": 220.0,
+      "model": "flashforge.ad5x",
+      "name": "Flashforge AD5X",
+      "nozzle_diameter_mm": 0.4,
+      "start_macro": "START_PRINT"
+    },
+    "services": {
+      "camera_snapshot_url": "",
+      "moonraker_url": "",
+      "moonraker_ws_url": "",
+      "openviking_url": "",
+      "spoolman_url": "",
+      "stock_api_port": 8898,
+      "vision_chat_url": ""
+    },
+    "timelapse": {
+      "archive_dir": "",
+      "archive_host": "",
+      "local_retention_days": 1,
+      "max_bytes": 209715200,
+      "plan_clip_retention_days": 14,
+      "render_poll_s": 10,
+      "render_wait_s": 900,
+      "ssh_key": ""
+    },
+    "vision": {
+      "model": "gemini-latest",
+      "roast_model": "luna-latest"
+    },
+    "visual_watch": {
+      "enabled": true,
+      "sensitivity": 3
+    }
+  },
+  "klipper.generic": {
+    "bambu": {
+      "command": [
+        "flatpak",
+        "run",
+        "--unshare=network",
+        "--command=bambu-studio",
+        "com.bambulab.BambuStudio"
+      ]
+    },
+    "bot": {
+      "health_port": 0,
+      "health_stale_s": 120,
+      "mode": "hermes",
+      "sync_commands": true
+    },
+    "cold_pull": {
+      "petg": [
+        245,
+        100
+      ],
+      "pla_trial": [
+        220,
+        90
+      ]
+    },
+    "discord": {
+      "allowed_user_ids": "",
+      "approval_user_id": "",
+      "bot_name": "Print Buddy",
+      "chat_id": "",
+      "cold_pull_outcome_s": 1800,
+      "daily_reset_hour": 4,
+      "post_print_quiet_s": 7200,
+      "question_timeout_s": 1800,
+      "safety_confirm_timeout_s": 600,
+      "timezone": "America/New_York",
+      "token_env": "DISCORD_BOT_TOKEN",
+      "upload_max_bytes": 9500000,
+      "upload_wait_s": 3600
+    },
+    "layout": {
+      "max_merged_hours": 12.0,
+      "merge_edge_margin_mm": 8.0,
+      "merge_spacing_mm": 10.0,
+      "multi_copy_edge_mm": 3.0,
+      "single_copy_edge_mm": 1.0
+    },
+    "listener": {
+      "ifs_presence_poll_s": 15,
+      "spool_nag_s": 600,
+      "start_claim_ttl_s": 1800,
+      "tick_s": 600
+    },
+    "llm": {
+      "api_key_env": "LLM_API_KEY",
+      "chat_url": "",
+      "model": "",
+      "timeout_s": 20.0
+    },
+    "maintenance": {
+      "full_days": 30,
+      "full_hours": 75,
+      "quick_hours": 25
+    },
+    "material_temps": {
+      "ABS": {
+        "bed": 100,
+        "nozzle": 245
+      },
+      "ASA": {
+        "bed": 105,
+        "nozzle": 260
+      },
+      "PA": {
+        "bed": 90,
+        "nozzle": 260
+      },
+      "PC": {
+        "bed": 110,
+        "nozzle": 275
+      },
+      "PETG": {
+        "bed": 85,
+        "nozzle": 240
+      },
+      "PLA": {
+        "bed": 60,
+        "nozzle": 210
+      },
+      "TPU": {
+        "bed": 50,
+        "nozzle": 230
+      }
+    },
+    "nozzle_temp_offsets": {
+      "brass": 0.0,
+      "diamond": 0.0,
+      "hardened_steel": 0.0,
+      "ruby": 0.0,
+      "stainless_steel": 0.0,
+      "tungsten_carbide": 0.0
+    },
+    "orca": {
+      "command": [
+        "flatpak",
+        "run",
+        "com.orcaslicer.OrcaSlicer"
+      ],
+      "templates": "<repo>/print_buddy/templates/orca/klipper_generic"
+    },
+    "paths": {
+      "archive": "~/3d-prints",
+      "cache": "~/.hermes/cache",
+      "ffmpeg": "ffmpeg",
+      "hermes_agent": "~/.hermes/hermes-agent",
+      "hermes_bin": "~/.local/bin/hermes",
+      "hermes_home": "~/.hermes/profiles/3dprinting",
+      "hermes_restart_helper": "~/.hermes/skills/autonomous-ai-agents/hermes-safe-restart/scripts/restart_hermes.py",
+      "records_vault": "~/Documents/3D Printing Records"
+    },
+    "prime_tower": {
+      "edge_mm": 10.0,
+      "merge_slack_mm": 5.0,
+      "part_clearance_mm": 8.0,
+      "size_mm": 45.0
+    },
+    "printer": {
+      "bed_mm": [
+        220.0,
+        220.0
+      ],
+      "end_macro": "PRINT_END",
+      "firmware": "Klipper",
+      "ifs_slots": 1,
+      "max_print_height_mm": 220.0,
+      "model": "klipper.generic",
+      "name": "Generic Klipper",
+      "nozzle_diameter_mm": 0.4,
+      "start_macro": "PRINT_START"
+    },
+    "services": {
+      "camera_snapshot_url": "",
+      "moonraker_url": "",
+      "moonraker_ws_url": "",
+      "openviking_url": "",
+      "spoolman_url": "",
+      "stock_api_port": 8898,
+      "vision_chat_url": ""
+    },
+    "timelapse": {
+      "archive_dir": "",
+      "archive_host": "",
+      "local_retention_days": 1,
+      "max_bytes": 209715200,
+      "plan_clip_retention_days": 14,
+      "render_poll_s": 10,
+      "render_wait_s": 900,
+      "ssh_key": ""
+    },
+    "vision": {
+      "model": "gemini-latest",
+      "roast_model": "luna-latest"
+    },
+    "visual_watch": {
+      "enabled": true,
+      "sensitivity": 3
+    }
+  },
+  "octoprint.marlin": {
+    "bambu": {
+      "command": [
+        "flatpak",
+        "run",
+        "--unshare=network",
+        "--command=bambu-studio",
+        "com.bambulab.BambuStudio"
+      ]
+    },
+    "bot": {
+      "health_port": 0,
+      "health_stale_s": 120,
+      "mode": "hermes",
+      "sync_commands": true
+    },
+    "cold_pull": {
+      "petg": [
+        245,
+        100
+      ],
+      "pla_trial": [
+        220,
+        90
+      ]
+    },
+    "discord": {
+      "allowed_user_ids": "",
+      "approval_user_id": "",
+      "bot_name": "Print Buddy",
+      "chat_id": "",
+      "cold_pull_outcome_s": 1800,
+      "daily_reset_hour": 4,
+      "post_print_quiet_s": 7200,
+      "question_timeout_s": 1800,
+      "safety_confirm_timeout_s": 600,
+      "timezone": "America/New_York",
+      "token_env": "DISCORD_BOT_TOKEN",
+      "upload_max_bytes": 9500000,
+      "upload_wait_s": 3600
+    },
+    "layout": {
+      "max_merged_hours": 12.0,
+      "merge_edge_margin_mm": 8.0,
+      "merge_spacing_mm": 10.0,
+      "multi_copy_edge_mm": 3.0,
+      "single_copy_edge_mm": 1.0
+    },
+    "listener": {
+      "ifs_presence_poll_s": 15,
+      "spool_nag_s": 600,
+      "start_claim_ttl_s": 1800,
+      "tick_s": 600
+    },
+    "llm": {
+      "api_key_env": "LLM_API_KEY",
+      "chat_url": "",
+      "model": "",
+      "timeout_s": 20.0
+    },
+    "maintenance": {
+      "full_days": 30,
+      "full_hours": 75,
+      "quick_hours": 25
+    },
+    "material_temps": {
+      "ABS": {
+        "bed": 100,
+        "nozzle": 245
+      },
+      "ASA": {
+        "bed": 105,
+        "nozzle": 260
+      },
+      "PA": {
+        "bed": 90,
+        "nozzle": 260
+      },
+      "PC": {
+        "bed": 110,
+        "nozzle": 275
+      },
+      "PETG": {
+        "bed": 85,
+        "nozzle": 240
+      },
+      "PLA": {
+        "bed": 60,
+        "nozzle": 210
+      },
+      "TPU": {
+        "bed": 50,
+        "nozzle": 230
+      }
+    },
+    "nozzle_temp_offsets": {
+      "brass": 0.0,
+      "diamond": 0.0,
+      "hardened_steel": 0.0,
+      "ruby": 0.0,
+      "stainless_steel": 0.0,
+      "tungsten_carbide": 0.0
+    },
+    "orca": {
+      "command": [
+        "flatpak",
+        "run",
+        "com.orcaslicer.OrcaSlicer"
+      ],
+      "templates": "<repo>/print_buddy/templates/orca/octoprint_marlin"
+    },
+    "paths": {
+      "archive": "~/3d-prints",
+      "cache": "~/.hermes/cache",
+      "ffmpeg": "ffmpeg",
+      "hermes_agent": "~/.hermes/hermes-agent",
+      "hermes_bin": "~/.local/bin/hermes",
+      "hermes_home": "~/.hermes/profiles/3dprinting",
+      "hermes_restart_helper": "~/.hermes/skills/autonomous-ai-agents/hermes-safe-restart/scripts/restart_hermes.py",
+      "records_vault": "~/Documents/3D Printing Records"
+    },
+    "prime_tower": {
+      "edge_mm": 10.0,
+      "merge_slack_mm": 5.0,
+      "part_clearance_mm": 8.0,
+      "size_mm": 45.0
+    },
+    "printer": {
+      "bed_mm": [
+        220.0,
+        220.0
+      ],
+      "end_macro": "PRINT_END",
+      "firmware": "Marlin",
+      "ifs_slots": 1,
+      "max_print_height_mm": 220.0,
+      "model": "octoprint.marlin",
+      "name": "Marlin via OctoPrint",
+      "nozzle_diameter_mm": 0.4,
+      "start_macro": "PRINT_START"
+    },
+    "services": {
+      "camera_snapshot_url": "",
+      "moonraker_url": "",
+      "moonraker_ws_url": "",
+      "openviking_url": "",
+      "spoolman_url": "",
+      "stock_api_port": 8898,
+      "vision_chat_url": ""
+    },
+    "timelapse": {
+      "archive_dir": "",
+      "archive_host": "",
+      "local_retention_days": 1,
+      "max_bytes": 209715200,
+      "plan_clip_retention_days": 14,
+      "render_poll_s": 10,
+      "render_wait_s": 900,
+      "ssh_key": ""
+    },
+    "vision": {
+      "model": "gemini-latest",
+      "roast_model": "luna-latest"
+    },
+    "visual_watch": {
+      "enabled": true,
+      "sensitivity": 3
+    }
+  },
+  "sovol.sv06": {
+    "bambu": {
+      "command": [
+        "flatpak",
+        "run",
+        "--unshare=network",
+        "--command=bambu-studio",
+        "com.bambulab.BambuStudio"
+      ]
+    },
+    "bot": {
+      "health_port": 0,
+      "health_stale_s": 120,
+      "mode": "hermes",
+      "sync_commands": true
+    },
+    "cold_pull": {
+      "petg": [
+        245,
+        100
+      ],
+      "pla_trial": [
+        220,
+        90
+      ]
+    },
+    "discord": {
+      "allowed_user_ids": "",
+      "approval_user_id": "",
+      "bot_name": "Print Buddy",
+      "chat_id": "",
+      "cold_pull_outcome_s": 1800,
+      "daily_reset_hour": 4,
+      "post_print_quiet_s": 7200,
+      "question_timeout_s": 1800,
+      "safety_confirm_timeout_s": 600,
+      "timezone": "America/New_York",
+      "token_env": "DISCORD_BOT_TOKEN",
+      "upload_max_bytes": 9500000,
+      "upload_wait_s": 3600
+    },
+    "layout": {
+      "max_merged_hours": 12.0,
+      "merge_edge_margin_mm": 8.0,
+      "merge_spacing_mm": 10.0,
+      "multi_copy_edge_mm": 3.0,
+      "single_copy_edge_mm": 1.0
+    },
+    "listener": {
+      "ifs_presence_poll_s": 15,
+      "spool_nag_s": 600,
+      "start_claim_ttl_s": 1800,
+      "tick_s": 600
+    },
+    "llm": {
+      "api_key_env": "LLM_API_KEY",
+      "chat_url": "",
+      "model": "",
+      "timeout_s": 20.0
+    },
+    "maintenance": {
+      "full_days": 30,
+      "full_hours": 75,
+      "quick_hours": 25
+    },
+    "material_temps": {
+      "ABS": {
+        "bed": 100,
+        "nozzle": 245
+      },
+      "ASA": {
+        "bed": 105,
+        "nozzle": 260
+      },
+      "PA": {
+        "bed": 90,
+        "nozzle": 260
+      },
+      "PC": {
+        "bed": 110,
+        "nozzle": 275
+      },
+      "PETG": {
+        "bed": 85,
+        "nozzle": 240
+      },
+      "PLA": {
+        "bed": 60,
+        "nozzle": 210
+      },
+      "TPU": {
+        "bed": 50,
+        "nozzle": 230
+      }
+    },
+    "nozzle_temp_offsets": {
+      "brass": 0.0,
+      "diamond": 0.0,
+      "hardened_steel": 0.0,
+      "ruby": 0.0,
+      "stainless_steel": 0.0,
+      "tungsten_carbide": 0.0
+    },
+    "orca": {
+      "command": [
+        "flatpak",
+        "run",
+        "com.orcaslicer.OrcaSlicer"
+      ],
+      "templates": "<repo>/print_buddy/templates/orca/sovol_sv06"
+    },
+    "paths": {
+      "archive": "~/3d-prints",
+      "cache": "~/.hermes/cache",
+      "ffmpeg": "ffmpeg",
+      "hermes_agent": "~/.hermes/hermes-agent",
+      "hermes_bin": "~/.local/bin/hermes",
+      "hermes_home": "~/.hermes/profiles/3dprinting",
+      "hermes_restart_helper": "~/.hermes/skills/autonomous-ai-agents/hermes-safe-restart/scripts/restart_hermes.py",
+      "records_vault": "~/Documents/3D Printing Records"
+    },
+    "prime_tower": {
+      "edge_mm": 10.0,
+      "merge_slack_mm": 5.0,
+      "part_clearance_mm": 8.0,
+      "size_mm": 45.0
+    },
+    "printer": {
+      "bed_mm": [
+        220.0,
+        220.0
+      ],
+      "end_macro": "PRINT_END",
+      "firmware": "Klipper",
+      "ifs_slots": 1,
+      "max_print_height_mm": 220.0,
+      "model": "sovol.sv06",
+      "name": "Sovol SV06",
+      "nozzle_diameter_mm": 0.4,
+      "start_macro": "PRINT_START"
+    },
+    "services": {
+      "camera_snapshot_url": "",
+      "moonraker_url": "",
+      "moonraker_ws_url": "",
+      "openviking_url": "",
+      "spoolman_url": "",
+      "stock_api_port": 8898,
+      "vision_chat_url": ""
+    },
+    "timelapse": {
+      "archive_dir": "",
+      "archive_host": "",
+      "local_retention_days": 1,
+      "max_bytes": 209715200,
+      "plan_clip_retention_days": 14,
+      "render_poll_s": 10,
+      "render_wait_s": 900,
+      "ssh_key": ""
+    },
+    "vision": {
+      "model": "gemini-latest",
+      "roast_model": "luna-latest"
+    },
+    "visual_watch": {
+      "enabled": true,
+      "sensitivity": 3
+    }
+  }
+}

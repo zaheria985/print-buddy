@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 from .. import printers, settings
-from . import _external, split_fit
+from . import _external, delivery, split_fit
 
 BED = settings.current()['printer']['bed_mm']
 IFS_SLOTS = settings.current()['printer']['ifs_slots']
@@ -314,7 +314,7 @@ def _fit_choice_reply(text, rows):
                    or (row['kind'] == 'painted' and 'split' in row['label'])]
     elif value in {'100%', '100', 'full', 'full size'} or 'full size' in value:
         matches = [i for i, row in enumerate(rows) if row['kind'] == 'split'
-                   or (row['kind'] == 'painted' and row['scale'] >= 1.0)]
+                   or (row['kind'] in ('painted', 'rotate') and row['scale'] >= 1.0)]
     elif value in {'cancel', 'stop', "don't print"}:
         matches = [i for i, row in enumerate(rows) if row['kind'] == 'cancel']
     elif value in {'shrink', 'smaller'}:
@@ -512,6 +512,86 @@ async def _pick_plate(adapter, source, key, parts, timeout=None):
     labels = [print_next.plate_choice_label(part, part.get('plate')) for part in parts]
     picked = await _ask(adapter, source, key, 'Which plate prints first?', labels + ['Cancel'], timeout)
     return picked if picked < len(parts) else None
+
+
+async def _delivery_menu(adapter, source, key, metadata, timeout, question, enabled, receipt, receipt_path,
+                         jp, gcodes):
+    """Post-slice choices from the vendor profile. 0 means Start was pressed; anything else means stop here.
+
+    Start (only when the vendor can print) is the same per-job bed-clear button as before and is the only
+    way to print. Each delivery runs at most once to completion, then leaves the menu; Done ends it.
+    """
+    can_print = delivery.PRINTER in enabled
+    offered = [m for m in enabled if m != delivery.PRINTER]
+    while True:
+        pending = [m for m in offered if not delivery.done(receipt, m)]
+        if not pending and not can_print:
+            return 1
+        choices = (([print_next.START_LABEL] if can_print else []) + [delivery.LABELS[m] for m in pending]
+                   + [delivery.DONE_LABEL])
+        picked = await _ask(adapter, source, key, question, choices, timeout)
+        label = choices[picked]
+        if label == print_next.START_LABEL:
+            return 0
+        if label == delivery.DONE_LABEL:
+            return 1
+        method = pending[picked - (1 if can_print else 0)]
+        await _deliver(adapter, source, metadata, method, receipt, jp, gcodes, pending)
+        receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
+        question = 'Anything else for this slice?' + (' Start uploads and prints it immediately.' if can_print else '')
+
+
+async def _deliver(adapter, source, metadata, method, receipt, jp, gcodes, pending):
+    """Run one delivery and report exactly what happened. Never uploads to or starts a printer."""
+    async def say(text):
+        return await adapter.send(chat_id=source.chat_id, content=text, metadata=metadata)
+    try:
+        job = json.loads(Path(jp).read_text())
+        artifacts = delivery.bound_artifacts(job, gcodes, receipt.get('gcode_sha256') or {})
+        if method == delivery.BAMBU_HANDOFF:
+            packages = await asyncio.to_thread(delivery.bambu_handoff, job, artifacts)
+            delivery.record(receipt, method, [{'source': p, 'sent': None, 'ok': True} for p in packages], True,
+                            'packaged')
+            where = (" Use 'Send the files here' to download it." if delivery.DISCORD in pending
+                     else ' On the Print Buddy host: ' + ', '.join(str(p) for p in packages) + '.')
+            names = ', '.join(p.name for p in packages)
+            await say(f'Bambu package ready: {names}.{where}\n'
+                      + delivery.handoff_note(delivery.current_model()))
+            return
+        files = await asyncio.to_thread(delivery.files_for_discord, job, artifacts)
+        limit = delivery.upload_limit()
+        already = delivery.delivered(receipt, method)
+        todo = [f for f in files if str(f) not in already]
+        plan = await asyncio.to_thread(delivery.discord_plan, todo, limit, Path(jp).parent / 'delivery')
+        items, failed = [], []
+        for item in plan:
+            label = f'Plate {files.index(item.source) + 1} of {len(files)}: {item.source.name}' if len(files) > 1 else None
+            text = delivery.discord_message(item, limit, label)
+            if item.mode == 'too_big':
+                await say(text)
+                items.append({'source': item.source, 'sent': None, 'ok': False, 'reason': 'too_big'})
+                continue
+            try:
+                result = await say(text)
+                ok = getattr(result, 'success', True) is not False
+                error = getattr(result, 'error', None) or 'Discord did not accept the upload'
+            except Exception as exc:  # a transport error is a failed delivery, not a crash
+                ok, error = False, str(exc)
+            items.append({'source': item.source, 'sent': item.file, 'ok': ok, **({} if ok else {'reason': error})})
+            if not ok:
+                failed.append(f'{item.source.name} ({error})')
+        sent = sum(1 for i in items if i['ok']) + len(already)
+        big = [i['source'].name for i in items if i.get('reason') == 'too_big']
+        delivery.record(receipt, method, items, not failed, f'{sent} of {len(files)} sent')
+        parts = [f'Sent {sent} of {len(files)} file(s) here.']
+        if big:
+            parts.append('Too big for Discord: ' + ', '.join(big) + '.')
+        if failed:
+            parts.append('Failed: ' + '; '.join(failed) + ". Pick 'Send the files here' again to retry those.")
+        await say(' '.join(parts) + ' Nothing was uploaded to a printer or started.')
+    except delivery.DeliveryRefused as exc:
+        delivery.record(receipt, method, [], False, str(exc))
+        await say(f'Not delivered: {exc}. Nothing was uploaded to a printer or started.')
 
 
 async def _send_render_preview(adapter, source, path, scale=1.0, rotation=None, bed=tuple(BED)):
@@ -1011,11 +1091,17 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
                          f"~{mj.human_dur(estimate_s + 300)}")
         if chosen_quantity and chosen_quantity != 1:
             estimate_text = f"{chosen_quantity} copies · " + estimate_text
+        # Post-slice choices come from the printer's vendor profile ([delivery] methods). Printing is
+        # offered only where the vendor has a connection (never for an offline Bambu Lab printer).
+        enabled = delivery.methods()
+        can_print = delivery.PRINTER in enabled
+        first_labels = [print_label, 'Slice only', 'Stop with colors saved', cancel_label][0 if can_print else 1:]
         choice = await _ask(adapter, source, key,
             f'{names} · {estimate_text}'
             + ('\n' + spool_text if spool_text else '') + caveat,
-            [print_label, 'Slice only', 'Stop with colors saved', cancel_label], timeout,
+            first_labels, timeout,
             on_shown=early.release.set)
+        choice = choice if can_print else choice + 1
         if choice in (2, 3):
             await early.discard()  # the early slice was for a job that will not print
             receipt['status'] = 'CANCELLED' if choice == 3 else 'COLORS_SAVED_STOPPED'
@@ -1110,7 +1196,9 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
         mj._timing(jp, 'intake_slice_returned')
         gcodes = [str(g) for g in (out if isinstance(out, list) else [out])]
         sliced = json.loads(jp.read_text())
-        receipt.update(status='SLICED', sliced=True, gcodes=gcodes)
+        # Deliveries are bound to these exact bytes; a file that changes afterwards is refused.
+        receipt.update(status='SLICED', sliced=True, gcodes=gcodes,
+                       gcode_sha256={g: delivery.sha256(g) for g in gcodes})
         receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
         provenance = sliced.get('provenance') or {}
         if not provenance and (sliced.get('derived_plates') or []):
@@ -1136,11 +1224,12 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
             parts = plan['parts']
             listing = '\n'.join(f"- Plate {p['plate']}: {p['label']}" for p in parts)
             notice = (f"These print as {len(parts)} separate plates because {plan['split_reason']}.\n{listing}\n{breakdown}\n"
-                      "Choose which plate prints first. When it finishes, a picker lists the rest.")
+                      + ("Choose which plate prints first. When it finishes, a picker lists the rest." if can_print
+                         else "Each plate is its own file."))
             receipt.update(split_plan=plan_id, split_reason=plan['split_reason'])
             receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
             await adapter.send(chat_id=source.chat_id, content=notice, metadata=metadata)
-            picked_plate = await _pick_plate(adapter, source, key, parts, timeout)
+            picked_plate = await _pick_plate(adapter, source, key, parts, timeout) if can_print else 0
             if picked_plate is None:
                 receipt['status'] = 'SLICED_NOT_STARTED'
                 receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
@@ -1177,11 +1266,17 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
                 question = breakdown + '\n' + question
             if slot_lines:
                 question = slot_lines + '\n' + question
-            go = await _ask(adapter, source, key, question, [print_next.START_LABEL, print_next.CANCEL_LABEL], timeout)
+            if delivery.only_printer(enabled):
+                go = await _ask(adapter, source, key, question, [print_next.START_LABEL, print_next.CANCEL_LABEL], timeout)
+            else:
+                if not can_print:
+                    question = breakdown + '\nSliced and validated. What should I do with the files?'
+                go = await _delivery_menu(adapter, source, key, metadata, timeout, question, enabled,
+                                          receipt, receipt_path, jp, gcodes)
             if go != 0:
                 receipt['status'] = 'SLICED_NOT_STARTED'
                 receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
-                tail = f' Plates stay ready: `/print-next {plan_id}`.' if split else ''
+                tail = f' Plates stay ready: `/print-next {plan_id}`.' if split and can_print else ''
                 await adapter.send(chat_id=source.chat_id, content='Sliced. Nothing uploaded or started.' + tail, metadata=metadata)
                 return {'action': 'skip', 'reason': 'operator did not start the sliced plate'}
         # One click recorded: bed clear, bound to the exact JOB.json and G-code. print-now still runs every gate
