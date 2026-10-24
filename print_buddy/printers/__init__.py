@@ -1,29 +1,43 @@
-"""Printer models, one module per printer inside a brand package. See base.py for the contract and the responsibility map.
+"""Printer profiles, vendor first, then printer. See base.py for the contract and docs/PRINTER-PROFILES.md.
 
     from print_buddy import printers
     printers.current().build_volume()
     printers.MODELS["flashforge.ad5x"].defaults()
+    printers.VENDORS["bambulab"].delivery
 
-Every brand package (flashforge/, sovol/, klipper/) is scanned; each module in it that defines MODEL is
-registered under its "brand.model" key. Adding a printer is one new file there plus its templates.
+Every vendor package (flashforge/, klipper/, sovol/, octoprint/, bambulab/) is scanned. Its __init__ defines
+VENDOR; each module in it that defines MODEL is registered under its "vendor.printer" key and inherits VENDOR.
+Adding a printer is one new file in its vendor package plus its templates.
 """
 from __future__ import annotations
 
 import importlib
 import pkgutil
 
-from .base import MultiColorUnsupported, PrinterAdapter, PrinterModel
+from dataclasses import replace
+
+from .base import MultiColorUnsupported, PrinterAdapter, PrinterModel, VendorProfile
 
 # Jobs written before the model was recorded were sliced for the AD5X.
 DEFAULT_MODEL = "flashforge.ad5x"
 
 
+# Other spellings of a vendor key that config may use. "bambu" reads as "bambulab".
+VENDOR_ALIASES = {"bambu": "bambulab", "bambu_lab": "bambulab", "bambulabs": "bambulab"}
+
+
 def _discover():
-    found = {}
+    vendors, found = {}, {}
     for brand in pkgutil.iter_modules(__path__):
         if not brand.ispkg:
             continue
         package = importlib.import_module(f"{__name__}.{brand.name}")
+        vendor = getattr(package, "VENDOR", None)
+        if not isinstance(vendor, VendorProfile):
+            raise RuntimeError(f"{package.__name__}: a vendor package must define VENDOR = VendorProfile(...)")
+        if vendor.key != brand.name:
+            raise RuntimeError(f"{package.__name__}: VENDOR key {vendor.key!r} must be {brand.name}")
+        vendors[vendor.key] = vendor
         for module in pkgutil.iter_modules(package.__path__):
             if module.ispkg:
                 continue
@@ -33,11 +47,53 @@ def _discover():
             if model.key != f"{brand.name}.{module.name}":
                 raise RuntimeError(f"{package.__name__}.{module.name}: MODEL key {model.key!r} must be "
                                    f"{brand.name}.{module.name}")
+            if model.vendor is None:
+                model = replace(model, vendor=vendor)  # a printer module that does not name its vendor
+            elif model.vendor != vendor:
+                raise RuntimeError(f"{package.__name__}.{module.name}: MODEL vendor {model.vendor.key!r} must be "
+                                   f"the {brand.name} package VENDOR")
             found[model.key] = model
-    return dict(sorted(found.items()))
+    return dict(sorted(vendors.items())), dict(sorted(found.items()))
 
 
-MODELS: dict[str, PrinterModel] = _discover()
+VENDORS: dict[str, VendorProfile]
+MODELS: dict[str, PrinterModel]
+VENDORS, MODELS = _discover()
+
+
+def vendor_key(name):
+    """Canonical vendor key for a configured vendor name or alias."""
+    name = str(name or "").strip().lower()
+    return VENDOR_ALIASES.get(name, name)
+
+
+def resolve_key(model, vendor=None):
+    """The registered "vendor.printer" key for a [printer] model value, with an optional [printer] vendor.
+
+    Accepts the full key ("flashforge.ad5x", what every existing config has), a vendor alias in it
+    ("bambu.a1"), or the printer part alone ("ad5x"), taken with `vendor` or, when it names exactly one
+    printer, on its own. A vendor that disagrees with a full key is refused rather than guessed.
+    """
+    raw = str(model or "").strip()
+    want_vendor = vendor_key(vendor) if vendor else None
+    if want_vendor and want_vendor not in VENDORS:
+        raise ValueError(f"[printer] vendor must be one of {', '.join(VENDORS)}, got {vendor!r}")
+    if "." in raw:
+        head, tail = raw.split(".", 1)
+        key = f"{vendor_key(head)}.{tail}"
+        if want_vendor and vendor_key(head) != want_vendor:
+            raise ValueError(f"[printer] vendor {vendor!r} does not match model {raw!r}")
+    elif want_vendor:
+        key = f"{want_vendor}.{raw}"
+    else:
+        matches = [k for k, m in MODELS.items() if m.printer_key == raw]
+        if len(matches) > 1:
+            raise ValueError(f"[printer] model {raw!r} exists for several vendors ({', '.join(matches)}); "
+                             "set [printer] vendor or use the full vendor.printer key")
+        key = matches[0] if matches else raw
+    if key not in MODELS:
+        raise ValueError(f"[printer] model must be one of {', '.join(MODELS)}, got {model!r}")
+    return key
 
 
 def model(key):

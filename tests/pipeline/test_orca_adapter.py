@@ -153,3 +153,13 @@ def test_bambu_output_still_fails_the_same_post_slice_gate(tmp_path, monkeypatch
         raise AssertionError('unsafe Bambu G-code bypassed the Orca post-slice gate')
     assert len(calls) == 2
 
+
+
+def test_absent_orca_slice_refuses_before_fallback_or_output(tmp_path, monkeypatch):
+    import pytest
+    missing = str(tmp_path / 'no-orca-executable')
+    monkeypatch.setattr(adapter, 'ORCA_COMMAND', [missing])
+    with patch('urllib.request.urlopen', side_effect=AssertionError('network fallback')):
+        with pytest.raises(FileNotFoundError, match='no-orca-executable'):
+            adapter.slice_model(_source(tmp_path), tmp_path / 'out', _state())
+    assert not list((tmp_path / 'out').glob('*.gcode'))
