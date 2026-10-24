@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import socket
+import math
 import sys
 import time
 
@@ -29,6 +31,9 @@ def hermes_modules_loaded(modules=None):
 
 
 def write(status):
+    from ..healthcheck import process_identity
+    status = {**status, "host": socket.gethostname(),
+              "process_start": process_identity(os.getpid())}
     target = path()
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_suffix(".tmp")
@@ -49,7 +54,9 @@ def _alive(pid):
         os.kill(int(pid), 0)
     except ProcessLookupError:
         return False
-    except (PermissionError, ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
+        return False
+    except PermissionError:
         return True
     return True
 
@@ -60,10 +67,19 @@ def evaluate(status, now=None, stale_s=None):
     stale_s = float(stale_s if stale_s is not None else _config.cfg()["bot"]["health_stale_s"])
     if not status:
         return False, f"no heartbeat at {path()}"
-    age = now - float(status.get("heartbeat_at") or 0)
-    if age > stale_s:
+    try:
+        age = now - float(status.get("heartbeat_at") or 0)
+    except (ValueError, TypeError):
+        return False, "invalid heartbeat timestamp"
+    if not math.isfinite(age) or age < -5 or age > stale_s:
         return False, f"heartbeat is {age:.0f}s old (limit {stale_s:.0f}s)"
-    if status.get("pid") and not _alive(status["pid"]):
+    try:
+        pid = int(status["pid"])
+        if pid <= 0:
+            raise ValueError("nonpositive PID")
+    except (KeyError, ValueError, TypeError, OverflowError):
+        return False, "invalid bot process identity"
+    if not _alive(pid):
         return False, f"bot process {status['pid']} is gone"
     if status.get("mode") != "standalone":
         return False, f"bot mode is {status.get('mode')!r}"
@@ -76,7 +92,16 @@ def evaluate(status, now=None, stale_s=None):
 
 def check(out=None):
     out = out or sys.stdout
-    ok, reason = evaluate(read())
+    status = read()
+    ok, reason = evaluate(status)
+    if ok:
+        from ..healthcheck import process_identity
+        try:
+            if (status.get("host") != socket.gethostname()
+                    or process_identity(status["pid"]) != status.get("process_start")):
+                ok, reason = False, "heartbeat belongs to another container or replaced process"
+        except (OSError, ValueError, TypeError, KeyError, IndexError, OverflowError):
+            ok, reason = False, "bot process identity unavailable"
     print(f"{'ok' if ok else 'FAIL'}  standalone bot: {reason}", file=out)
     return 0 if ok else 1
 

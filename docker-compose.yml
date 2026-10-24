@@ -1,41 +1,44 @@
+# Installation example only. No published release image exists yet.
+# Set PRINT_BUDDY_IMAGE to an approved locally built image or future immutable digest.
+x-runtime: &runtime
+  image: ${PRINT_BUDDY_IMAGE:?Set PRINT_BUDDY_IMAGE to a tested image digest or local tag}
+  restart: unless-stopped
+  env_file: [.env]
+  environment:
+    # To use legacy TOML, select /app/config/docker.toml in .env.
+    # Mount a custom config at the selected path with a local Compose override.
+    PRINT_BUDDY_CONFIG: ${PRINT_BUDDY_CONFIG:-/app/config/docker.yaml}
+    PRINT_BUDDY__BOT__MODE: standalone
+  volumes:
+    - ${PRINT_BUDDY_DATA:-./data}/hermes:/data/hermes
+    - ${PRINT_BUDDY_DATA:-./data}/archive:/data/archive
+    - ${PRINT_BUDDY_DATA:-./data}/records:/data/records
+    - ${PRINT_BUDDY_DATA:-./data}/cache:/data/cache
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 256
+  mem_limit: 2g
+  cpus: 2
+  shm_size: 256m
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: "3"}
 services:
-  print-buddy:
-    build: .
-    image: print-buddy:local
-    container_name: print-buddy
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      PRINT_BUDDY_CONFIG: ${PRINT_BUDDY_CONFIG:-/app/config/docker.yaml}
-      # All scalar settings can be overridden with PRINT_BUDDY__SECTION__KEY
-      # Example (also in .env.example):
-      # PRINT_BUDDY__SERVICES__MOONRAKER_URL: http://192.168.1.10:7125
-      # PRINT_BUDDY__SERVICES__SPOOLMAN_URL: http://spoolman:8000
-      # PRINT_BUDDY__PRINTER__MODEL: flashforge.ad5x
-    volumes:
-      - ./data/hermes:/data/hermes
-      - ./data/archive:/data/archive
-      - ./data/records:/data/records
-      - ./data/cache:/data/cache
-      # Optional YAML override (set PRINT_BUDDY_CONFIG=/app/config/local.yaml in .env)
-      # - ./config/local.yaml:/app/config/local.yaml:ro
-      # Legacy TOML override: set PRINT_BUDDY_CONFIG=/app/config/docker.toml in .env
-      # - ./config/docker.toml:/app/config/docker.toml:ro
-    depends_on:
-      - spoolman
-    shm_size: "1gb"
-    # Uncomment for host networking if Moonraker is on the host and you prefer not to publish ports
-    # network_mode: host
-
-  spoolman:
-    image: ghcr.io/donkie/spoolman:0.27.0
-    container_name: spoolman
-    restart: unless-stopped
-    ports:
-      - "7912:8000"
-    volumes:
-      - ./data/spoolman:/home/app/.local/share/spoolman
-    environment:
-      - TZ=Etc/UTC
-    # Spoolman data dir must be writable by uid 1000
+  bot:
+    <<: *runtime
+    command: [python3, -m, print_buddy.bot]
+    healthcheck:
+      test: [CMD, python3, -m, print_buddy.bot, health]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+  listener:
+    <<: *runtime
+    command: [python3, -m, print_buddy.hermes.moonraker_event_listener]
+    healthcheck:
+      test: [CMD, python3, -m, print_buddy.healthcheck]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3

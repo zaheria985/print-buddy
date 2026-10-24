@@ -15,6 +15,8 @@ import pytest
 
 from print_buddy.core import model_job  # noqa: E402
 from print_buddy.core import prepared_intake  # noqa: E402
+from print_buddy.core.background_slice import slice_binding  # noqa: E402
+from print_buddy.core.slice_recipe import binding_sha256  # noqa: E402
 from .helpers import external  # noqa: E402
 print_next = external("print_next")
 from .test_color_intake import source, state  # noqa: E402
@@ -89,8 +91,10 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(orca_adapter, 'orca_plate_capacity', lambda path, st: 1)
     sliced = []
     kept = _Kept(sliced)
+    recipes = []
 
-    def fake_slice(job_path):
+    def fake_slice(job_path, recipe_sha256=None):
+        recipes.append(recipe_sha256)
         gcode = Path(job_path).parent / 'sliced' / 'plate_1.gcode'
         gcode.parent.mkdir(parents=True, exist_ok=True)
         gcode.write_text('; estimated printing time (normal mode) = 1h 0m 0s\nG1 X1\n')
@@ -119,7 +123,7 @@ def env(tmp_path, monkeypatch):
                                           {'gcode': str(Path(filename)), 'plate': 1, 'parts': ['Ghost Stand'],
                                            'slot': 1, 'color': 'white', 'material': 'PLA',
                                            'filament_g': None, 'seconds': 3600}))
-    return S(root=tmp_path / 'receipts', sliced=kept, starts=starts, tmp=tmp_path)
+    return S(root=tmp_path / 'receipts', sliced=kept, starts=starts, tmp=tmp_path, recipes=recipes)
 
 
 def _copy(src, dest):
@@ -176,6 +180,12 @@ def test_one_click_slice_and_print_needs_no_typed_approval(env):
     assert approval['gcode_sha256'] == env.starts[0]['gcode_sha256']
     assert approval['job_json'].endswith('JOB.json')
     assert not any('Approved' in q['question'] for q in adapter.questions)
+    # The confirmed recipe is the one the worker was asked to slice, and it is the job's current recipe.
+    job = json.loads(Path(approval['job_json']).read_text())
+    current = binding_sha256(slice_binding(job, model_job.file_sha256(job['downloaded_file'])))
+    assert env.recipes == [current]
+    assert receipt['slice_approval']['recipe_version'] == 1
+    assert receipt['slice_approval']['recipe_sha256'] == current
 
 
 def test_slice_only_posts_start_button_bound_to_exact_plate(env):
@@ -315,8 +325,8 @@ def test_resume_continues_the_saved_intake_instead_of_stopping_at_the_marker(env
 def test_changed_gcode_after_slice_is_refused_by_existing_gate(env, monkeypatch):
     real_slice = model_job.slice_job
 
-    def tamper(job_path):
-        out = real_slice(job_path)
+    def tamper(job_path, **kwargs):
+        out = real_slice(job_path, **kwargs)
         starts_target = Path(out[0])
         # change the bytes after the sha is taken by prepare_link? simulate via start wrapper below
         return out
@@ -643,7 +653,7 @@ def test_quantity_buttons_choose_midpoint_and_answer_duration(env, monkeypatch):
     monkeypatch.setattr(orca_adapter, 'orca_plate_capacity', lambda path, st: 3)
     calls = []
 
-    def fake_slice(job_path, copies=None):
+    def fake_slice(job_path, copies=None, recipe_sha256=None):
         calls.append(copies)
         gcode = Path(job_path).parent / 'sliced' / 'plate_1.gcode'
         gcode.parent.mkdir(parents=True, exist_ok=True)
@@ -678,7 +688,7 @@ def test_typed_quantity_uses_value_not_button_position(env, monkeypatch):
     monkeypatch.setattr(orca_adapter, 'orca_plate_capacity', lambda path, st: 6)
     calls = []
 
-    def fake_slice(job_path, copies=None):
+    def fake_slice(job_path, copies=None, recipe_sha256=None):
         calls.append(copies)
         return []
 
@@ -718,7 +728,7 @@ def test_capacity_zero_full_size_split_saves_separate_mode_before_slice(env, mon
     monkeypatch.setattr(orca_adapter, 'fit_options',
                         lambda path, st: {'scales': [0.98, 0.75, 0.5], 'rotations': []})
 
-    def fake_split_slice(job_path, copies=None):
+    def fake_split_slice(job_path, copies=None, recipe_sha256=None):
         job_path = Path(job_path)
         data = json.loads(job_path.read_text())
         gcodes, rows = [], []
@@ -1028,6 +1038,24 @@ def test_reprint_offers_last_model_and_never_downloads(env, monkeypatch):
     assert len(env.starts) == 2
 
 
+def test_reprint_after_restart_explains_interrupted_slice_and_asks_again(env):
+    run_flow(env, [1, 0, 0], mid='first')
+    prev = prepared_intake.last_job()
+    folder = Path(prev['downloaded_file']).parents[1]
+    # Left by a Print Buddy process that stopped mid-slice.
+    (folder / 'WORKER.json').write_text(json.dumps({'state': 'running', 'step': 'slicing', 'started_at': 1.0,
+                                                     'worker_pid': 1, 'owner': 'previous-run'}))
+    event = S(source=S(profile='3dprinting', chat_id='c1', thread_id=None, user_id='u'), message_id='again',
+              text='print the previous print in black')
+    adapter = Adapter([0, 1, 0, 0])  # yes reprint, slot 2, slice and print
+    asyncio.run(prepared_intake.prepare_link(event, adapter, state(), env.root, timeout=1, reuse=prev))
+    first = adapter.questions[0]['question']
+    assert 'interrupted during slicing' in first and 'asked again' in first
+    assert not (folder / 'WORKER.json').exists()  # explained once
+    # The new intake asked for its own color and bed-clear choices before starting.
+    assert len(adapter.questions) >= 3 and len(env.starts) == 2
+
+
 def test_declined_reprint_does_nothing(env):
     run_flow(env, [1, 0, 0], mid='first')
     prev = prepared_intake.last_job()
@@ -1054,7 +1082,7 @@ def _split_env(env, monkeypatch, tag):
     monkeypatch.setattr(orca_adapter, 'fit_options',
                         lambda path, st: {'scales': [0.98, 0.75, 0.5], 'rotations': []})
 
-    def fake_split_slice(job_path, copies=None):
+    def fake_split_slice(job_path, copies=None, recipe_sha256=None):
         job_path = Path(job_path)
         data = json.loads(job_path.read_text())
         gcodes, rows = [], []

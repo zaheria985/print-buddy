@@ -1,0 +1,22 @@
+# Optional example adapted from zaheria985 Docker commit 3bb0984 (MIT).
+# No host port: UI access is intentionally not published by this override.
+services:
+  bot:
+    environment:
+      PRINT_BUDDY__SERVICES__SPOOLMAN_URL: http://spoolman:8000
+  listener:
+    environment:
+      PRINT_BUDDY__SERVICES__SPOOLMAN_URL: http://spoolman:8000
+  spoolman:
+    image: ghcr.io/donkie/spoolman:0.27.0
+    restart: unless-stopped
+    volumes:
+      - ${PRINT_BUDDY_DATA:-./data}/spoolman:/home/app/.local/share/spoolman
+    environment:
+      TZ: America/New_York
+    mem_limit: 512m
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
