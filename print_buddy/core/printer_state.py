@@ -231,6 +231,21 @@ def offset_authority_problems(st, variables, native):
     return ["calibration mode is unknown; no offset substitution permitted"]
 
 
+def _check_spoolman(st, probs, facts):
+    """The recorded spool against its Spoolman record; failures are appended to probs."""
+    try:
+        sp = _get(f"{st['spoolman_url']}/api/v1/spool/{st['spool']['spoolman_id']}")
+        facts["spool_name"] = sp["filament"]["name"]
+        facts["spool_material"] = sp["filament"].get("material")
+        facts["spool_remaining_g"] = round(sp.get("remaining_weight") or 0)
+        if sp.get("archived"):
+            probs.append(f"Spoolman spool #{sp['id']} is archived")
+        if sp["filament"]["name"] != st["spool"]["name"]:
+            probs.append(f"Spoolman #{sp['id']} is '{sp['filament']['name']}', state says '{st['spool']['name']}'")
+    except Exception as e:
+        probs.append(f"Spoolman lookup failed: {e}")
+
+
 def check(st=None):
     """Return (ok, problems, facts). Never raises on network errors; reports them."""
     st = st or load()
@@ -245,8 +260,14 @@ def check(st=None):
             probs.append(str(exc))
         # Nozzle/calibration and loaded spool are operator records on Marlin.
         return (not probs), probs, facts
+    if adapter.connection == 'offline':
+        # No printer connection (Bambu Lab): the hardware record and Spoolman only, never Moonraker.
+        facts["connection"] = "offline"
+        probs.extend(adapter.readiness_problems(st, {}))
+        _check_spoolman(st, probs, facts)
+        return (not probs), probs, facts
     native = adapter.has_native_screen  # offset authority is a ZMod screen concept
-    mr, sm = st["moonraker_url"], st["spoolman_url"]
+    mr = st["moonraker_url"]
     try:
         s = _get(f"{mr}/printer/objects/query?configfile=settings")["result"]["status"]["configfile"]["settings"]
         facts["klipper_nozzle"] = float(s["extruder"]["nozzle_diameter"])
@@ -268,17 +289,7 @@ def check(st=None):
             facts["active_spool_mismatch"] = f"Moonraker active spool {facts['moonraker_active_spool']} != state #{st['spool']['spoolman_id']}"
     except Exception as e:
         probs.append(f"Moonraker spoolman status failed: {e}")
-    try:
-        sp = _get(f"{sm}/api/v1/spool/{st['spool']['spoolman_id']}")
-        facts["spool_name"] = sp["filament"]["name"]
-        facts["spool_material"] = sp["filament"].get("material")
-        facts["spool_remaining_g"] = round(sp.get("remaining_weight") or 0)
-        if sp.get("archived"):
-            probs.append(f"Spoolman spool #{sp['id']} is archived")
-        if sp["filament"]["name"] != st["spool"]["name"]:
-            probs.append(f"Spoolman #{sp['id']} is '{sp['filament']['name']}', state says '{st['spool']['name']}'")
-    except Exception as e:
-        probs.append(f"Spoolman lookup failed: {e}")
+    _check_spoolman(st, probs, facts)
     try:
         if not native:
             return (not probs), probs, facts

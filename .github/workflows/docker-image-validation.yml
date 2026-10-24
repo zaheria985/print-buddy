@@ -1,0 +1,105 @@
+name: Docker image validation (manual)
+
+# INERT until a maintainer dispatches it: no push, pull_request or schedule trigger. It builds ONE
+# image variant on ONE hosted runner and runs tests/docker/image_acceptance.sh against it offline.
+# It never pushes or publishes an image, tags, releases or deploys, and never contacts Discord, a
+# printer or a Spoolman server. The image and the build cache are discarded with the runner.
+# Run only under the approval packet in docs/DOCKER-117-ACCEPTANCE.md ("Phase 3 hosted run").
+on:
+  workflow_dispatch:
+    inputs:
+      app_channel:
+        description: Application channel label
+        type: choice
+        options: [development, stable]
+        default: development
+      with_orca:
+        description: Build the pinned OrcaSlicer from source
+        type: boolean
+        default: true
+      with_bambu:
+        description: Build the pinned Bambu Studio from source (default slicer for Bambu Lab)
+        type: boolean
+        default: false
+      orca_channel:
+        description: OrcaSlicer revision (independent of the application channel)
+        type: choice
+        options: [stable, alpha]
+        default: stable
+      orca_build_jobs:
+        description: Compile jobs, auto or 1-64
+        type: string
+        default: auto
+      spoolman_mode:
+        description: Spoolman mode for runtime acceptance
+        type: choice
+        options: [external, bundled]
+        default: external
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-image-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04  # amd64 only; pinned: ubuntu-latest moves to 26 on 2026-10-19
+    timeout-minutes: 330   # below the 6 h hosted-job limit; the build is bounded inside it
+    env:
+      IMAGE: print-buddy-validation:${{ github.run_id }}-${{ github.run_attempt }}
+      # Inputs reach the shell only as environment variables, never interpolated into scripts.
+      APP_CHANNEL: ${{ inputs.app_channel }}
+      WITH_ORCA: ${{ inputs.with_orca }}
+      WITH_BAMBU: ${{ inputs.with_bambu }}
+      ORCA_CHANNEL: ${{ inputs.orca_channel }}
+      ORCA_BUILD_JOBS: ${{ inputs.orca_build_jobs }}
+      SPOOLMAN_MODE: ${{ inputs.spoolman_mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Record the exact source and Orca revisions
+        id: pins
+        run: |
+          set -euo pipefail
+          stable=$(sed -n 's/^ARG ORCA_STABLE_REF=//p' Dockerfile)
+          alpha=$(sed -n 's/^ARG ORCA_ALPHA_REF=//p' Dockerfile)
+          for ref in "$stable" "$alpha"; do [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || { echo "unpinned Orca ref $ref"; exit 1; }; done
+          mkdir -p evidence
+          { echo "source_sha=$GITHUB_SHA"; echo "orca_stable_ref=$stable"; echo "orca_alpha_ref=$alpha"
+            echo "app_channel=$APP_CHANNEL with_orca=$WITH_ORCA with_bambu=$WITH_BAMBU orca_channel=$ORCA_CHANNEL orca_build_jobs=$ORCA_BUILD_JOBS spoolman=$SPOOLMAN_MODE"
+          } | tee evidence/pins.txt
+      - name: Free runner disk for the source build
+        if: inputs.with_orca || inputs.with_bambu
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h / | tee evidence/disk.txt
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+        with:
+          driver: docker  # build straight into the runner's image store; nothing is pushed
+      - name: Build (no push)
+        run: |
+          set -euo pipefail
+          start=$(date -u +%FT%TZ)
+          docker buildx build --progress=plain --load -t "$IMAGE" \
+            --build-arg "APP_CHANNEL=$APP_CHANNEL" \
+            --build-arg "WITH_ORCA=$WITH_ORCA" \
+            --build-arg "WITH_BAMBU=$WITH_BAMBU" \
+            --build-arg "ORCA_CHANNEL=$ORCA_CHANNEL" \
+            --build-arg "ORCA_BUILD_JOBS=$ORCA_BUILD_JOBS" \
+            . 2>&1 | tee evidence/build.log
+          { echo "build_start=$start"; echo "build_end=$(date -u +%FT%TZ)"
+            echo "image_id=$(docker image inspect --format '{{.Id}}' "$IMAGE")"
+            docker image inspect --format 'platform={{.Os}}/{{.Architecture}} size={{.Size}}' "$IMAGE"
+            docker run --rm --entrypoint sh "$IMAGE" -c 'cat /orca-build-info 2>/dev/null || echo orca=absent; cat /bambu-build-info 2>/dev/null || echo bambu=absent'
+          } | tee evidence/identity.txt
+      - name: Offline runtime acceptance
+        run: tests/docker/image_acceptance.sh "$IMAGE" "$SPOOLMAN_MODE" evidence/acceptance
+      - name: Keep the evidence (logs and identities only, never the image)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: docker-image-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 30

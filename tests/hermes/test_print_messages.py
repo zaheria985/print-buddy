@@ -168,16 +168,14 @@ def test_claimed_start_edits_existing_message_and_posts_no_second_start(job, tmp
 def test_claimed_start_edit_failure_posts_distinct_short_line(job, tmp_path, monkeypatch):
     edits = _claimed_listener(monkeypatch, tmp_path, job, edit_ok=False)
     posted = _drive_listener(monkeypatch, job.hashed, ["standby", "printing"], claimed=True)
-    assert len(edits) == 1 and len(posted) == 1
-    assert posted[0].startswith("Warmup done, now printing") and TITLE in posted[0]
-    assert "Print started" not in posted[0] and "\n" not in posted[0]
+    # The intake's start post already exists; a failed edit must not add a trailing status line.
+    assert len(edits) == 1 and posted == []
 
 
 def test_claimed_start_without_message_id_posts_short_line_not_second_start(job, tmp_path, monkeypatch):
     edits = _claimed_listener(monkeypatch, tmp_path, job, message_id=None)
     posted = _drive_listener(monkeypatch, job.hashed, ["standby", "printing"], claimed=True)
-    assert edits == [] and len(posted) == 1
-    assert posted[0].startswith("Warmup done, now printing") and "Print started" not in posted[0]
+    assert edits == [] and posted == []
 
 
 def test_unclaimed_start_still_gets_the_normal_post(job, tmp_path, monkeypatch):
@@ -583,7 +581,7 @@ def test_every_plugin_and_intake_send_uses_content_keyword():
 
 
 def test_model_link_receipt_is_sent_before_slow_intake(monkeypatch):
-    """A dropped link gets its 'Got the link' reply before download/inventory starts."""
+    """A dropped link gets no receipt; the preview and picker follow."""
     import types
     plugin = _load("print_feedback_ackfirst", HERE.parents[1] / "plugins/print-feedback/__init__.py")
     adapter = StrictAdapter()
@@ -607,8 +605,8 @@ def test_model_link_receipt_is_sent_before_slow_intake(monkeypatch):
                 _session_key_for_source=lambda s: "k")
     event = S(source=src, text="https://makerworld.com/en/models/123", message_id="m9", internal=False, metadata={})
     asyncio.run(plugin.model_link_dispatch(event, gateway))
-    assert order and order[0][1], "receipt must be delivered before intake starts"
-    assert order[0][1][0].startswith("Got the link")
+    # No "Got the link" receipt: the model preview and color picker are the acknowledgement.
+    assert order and order[0][1] == []
     # receive_ack must not double-send for the same handled message.
     asyncio.run(plugin.receive_ack(event, gateway))
-    assert len(adapter.sent) == 1
+    assert adapter.sent == []

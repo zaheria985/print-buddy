@@ -20,8 +20,9 @@ STATE = ROOT / "tests" / "pipeline" / "fixtures" / "printer_hardware.json"
 CASES = ROOT / "tests" / "corpus" / "cases"
 MODELS = {"ad5x": "flashforge.ad5x", "sv06": "sovol.sv06"}
 SOURCES = {"single-part": {}, "parts-one-plate": {"copies": 2}}
-# Identity keys that legitimately changed with the refactor (family became model, per-model names).
-IDENTITY = ("family", "model", "name", "firmware")
+# Identity keys that legitimately changed with the refactor (family became model, per-model names), and
+# the vendor profile's identity and slicer choice (not Orca inputs; the argv below pins the slicer).
+IDENTITY = ("family", "model", "name", "firmware", "vendor", "slicer")
 # The AD5X start/end live in its Orca template; its model file now names them START_PRINT/END_PRINT (nothing reads them).
 UNUSED = {"ad5x": ("start_macro", "end_macro")}
 SECTIONS = ("printer", "layout", "prime_tower", "cold_pull")

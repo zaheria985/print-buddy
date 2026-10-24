@@ -43,11 +43,9 @@ class FeatureClearanceTests(unittest.TestCase):
         text = fit_question('Model', {'scales': [0.95], 'parts': [{'name': 'Stand', 'extent_mm': [130, 230, 30],
                              'orientations_checked': ['authored XY', 'best yaw 90°']} ]})
         self.assertIn('Stand (130 × 230 × 30 mm)', text)
-        self.assertIn('best yaw 90°', text)
+        self.assertNotIn('Orientations checked', text)
         self.assertIn('95%', text)
-        self.assertIn('only already-independent parts', text)
-        self.assertIn('not implemented', text)
-        self.assertIn('issues/83', text)
+        self.assertNotIn('issues/83', text)  # no GitHub links or option essays in chat
 
     def test_painted_scale_search_uses_small_coarse_ladder(self):
         from print_buddy.core.model_job import PAINTED_SCALE_STEPS

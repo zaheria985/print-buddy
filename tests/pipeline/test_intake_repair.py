@@ -79,7 +79,7 @@ def test_intake_flow_quantity_prompt_and_duration_answer(env, monkeypatch):
     monkeypatch.setattr(orca_adapter, 'orca_plate_capacity', lambda path, st: 3)
     slice_calls = []
 
-    def mock_slice(job_path, copies=None):
+    def mock_slice(job_path, copies=None, recipe_sha256=None):
         slice_calls.append(copies)
         gcode = Path(job_path).parent / 'sliced' / 'plate_1.gcode'
         gcode.parent.mkdir(parents=True, exist_ok=True)

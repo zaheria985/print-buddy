@@ -1,5 +1,20 @@
 # Print Buddy Internal Release Notes
 
+# Unreleased
+
+**What users can do now:**
+- Set `logging.level`, `logging.format` (`text` or `json`) and an optional `logging.file` to control how much Print Buddy logs and where. Log lines carry a time with offset, severity and component, and the intake id while an intake runs.
+- Find slicing trouble in the logs: each OrcaSlicer or Bambu Studio run records its exit code and elapsed time, and a switch to the Bambu fallback is a warning with the reason.
+
+**Fixes and reliability:**
+- Intake failures, fit check failures and slice failures now log the full traceback instead of only a short message in the receipt.
+- Credentials are redacted from every log line and traceback.
+
+**Technical details:**
+- New `print_buddy/logs.py` (`configure`, `bind`, `stage`, `redact`). The standalone bot and the listener call `configure()`; the Hermes plugin path does not, so the gateway's own logging is untouched.
+- The listener's `log()` helper still writes its legacy file and also feeds the shared logger, so existing tests and `listener.log` readers are unaffected.
+- Issue: #150. Offline tests: `tests/test_logs.py`.
+
 # Version 2.0.6
 
 **Release Date:** 2026-10-20

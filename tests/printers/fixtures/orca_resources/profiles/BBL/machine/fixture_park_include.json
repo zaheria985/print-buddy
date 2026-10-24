@@ -1,0 +1,7 @@
+{
+  "type": "machine",
+  "name": "fixture_park_include",
+  "from": "system",
+  "instantiation": "false",
+  "time_lapse_gcode": "; fixture timelapse park\nG1 X-40 F3000\n"
+}

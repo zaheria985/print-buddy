@@ -1,0 +1,17 @@
+{
+  "name": "Print Buddy test fixture",
+  "version": "00.00.00.00",
+  "machine_list": [
+    {"name": "fixture_machine_common", "sub_path": "machine/fixture_machine_common.json"},
+    {"name": "fixture_park_include", "sub_path": "machine/fixture_park_include.json"},
+    {"name": "Bambu Lab A1 0.4 nozzle", "sub_path": "machine/Bambu Lab A1 0.4 nozzle.json"}
+  ],
+  "process_list": [
+    {"name": "fixture_process_common", "sub_path": "process/fixture_process_common.json"},
+    {"name": "0.20mm Standard @BBL A1", "sub_path": "process/0.20mm Standard @BBL A1.json"}
+  ],
+  "filament_list": [
+    {"name": "fixture_filament_common", "sub_path": "filament/fixture_filament_common.json"},
+    {"name": "Generic PLA @BBL A1", "sub_path": "filament/Generic PLA @BBL A1.json"}
+  ]
+}

@@ -112,6 +112,7 @@ class OrcaRealSliceTests(unittest.TestCase):
 
 
 @pytest.mark.skipif(not REAL, reason="set PRINT_BUDDY_REAL_SLICER=1 to slice with the real Orca CLI")
+# The A1 (0.4 mm only) slices from profiles generated from the installed OrcaSlicer: test_orca_real_bambu_a1.py.
 @pytest.mark.parametrize("printer_key,size", [("flashforge.ad5x", 0.25), ("flashforge.ad5x", 0.4), ("flashforge.ad5x", 0.6), ("flashforge.ad5x", 0.8), ("sovol.sv06", 0.2)])
 def test_real_slicer_supported_nozzle_sizes(printer_key, size):
     from print_buddy import printers

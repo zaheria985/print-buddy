@@ -63,7 +63,7 @@ def test_screen_cancel_reboot_paths():
     posts.clear()
     ok, _ = mel.screen_cancel_reboot("f.gcode", status_reader=lambda: {"state": "paused", "klippy": "shutdown"},
                                      rebooter=lambda: 1 / 0, clearer=lambda: (True, "Cleared."), poster=posts.append)
-    assert ok and "emergency stop" in posts[0]
+    assert ok and posts == ["Cleared."]  # the cancel report already said it; one result line only
 
 
 def test_native_screen_cancel_detection():

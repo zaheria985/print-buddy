@@ -89,9 +89,188 @@ def is_allowed_filament_id(value, own_ids=None):
     return bool(HERMES_SLOT_PATTERN.match(v))
 
 
+# Orca 2.5+ tags the end of the machine start G-code and the start of the end G-code. Orca 2.4 does not:
+# there the first layer change opens the toolpath and the last "Custom" role tag (written just before the
+# filament and machine end G-code) closes it. Bambu Lab profiles use "; CHANGE_LAYER" and "; FEATURE: ".
+# These are comments, so they only split the file: a printer that trusts its vendor blocks must also check
+# them against its verified templates (printers.bambulab.guard). A spoofed or duplicated marker then moves vendor
+# lines into the checked toolpath, or toolpath lines into a template check, and is refused either way.
+EXEC_START = re.compile(r"^; EXECUTABLE_BLOCK_START\s*$", re.M)
+EXEC_END = re.compile(r"^; EXECUTABLE_BLOCK_END\s*$", re.M)
+START_TAG = re.compile(r"^; MACHINE_START_GCODE_END\s*$", re.M)
+END_TAG = re.compile(r"^; MACHINE_END_GCODE_START\s*$", re.M)
+LAYER_TAG = re.compile(r"^;(?: CHANGE_LAYER|LAYER_CHANGE)\s*$", re.M)
+CUSTOM_TAG = re.compile(r"^;(?: FEATURE: |TYPE:)Custom\s*$", re.M)
+
+def split_toolpath(text):
+    """(prelude, toolpath, epilogue) of the executable G-code, or None when the boundaries cannot be found.
+
+    prelude is everything executable before the toolpath (machine and filament start G-code and Orca's own
+    preamble), epilogue everything after it (filament and machine end G-code).
+    """
+    first = EXEC_START.search(text)
+    last = EXEC_END.search(text, first.end() if first else 0)
+    exe = text[first.end() if first else 0:last.start() if last else len(text)]
+    start = START_TAG.search(exe) or LAYER_TAG.search(exe)
+    if start is None:
+        return None
+    rest = exe[start.end():]
+    end = END_TAG.search(rest)
+    if end is None:
+        ends = list(CUSTOM_TAG.finditer(rest))
+        end = ends[-1] if ends else None
+    if end is None:
+        return None
+    return exe[:start.start()], rest[:end.start()], rest[end.start():]
+
+def toolpath(text):
+    """Orca's own toolpath, without the machine start and end G-code; None when it cannot be located."""
+    split = split_toolpath(text)
+    return split[1] if split else None
+
+def _mm(value):
+    return "?" if value is None else f"{value:g}"
+
+# G-codes allowed in a checked toolpath. Moves, modes, E-only G92, dwell, units, Bambu clog detection (G392) and the in-print nozzle
+# clump and head-wrap probes (G39, G39.3), which leave Z unknown. Anything else (arcs, homing, probing, coordinate
+# resets) is refused there rather than guessed.
+TOOLPATH_GCODES = {"G0", "G1", "G4", "G21", "G90", "G91", "G92", "G39", "G39.3", "G392"}
+# G-codes that move an axis without saying where it ends up.
+UNKNOWN_AFTER = {"G28": "XYZ", "G29": "XYZ", "G29.2": "", "G380": "Z", "G39": "Z", "G39.3": "Z", "G39.4": "Z"}
+
+class Motion:
+    """Modal G-code state: positioning (G90/G91), extruder mode (M82/M83, reset by G90/G91), G92 and position.
+
+    Unknown is a value: a position after homing or probing, a relative move from an unknown position, an
+    extruder mode not set since the last G90/G91. Checks treat unknown as unsafe where it matters.
+    """
+
+    def __init__(self):
+        self.pos = {"X": None, "Y": None, "Z": None, "E": None}
+        self.relative = None  # None: never set
+        self.e_relative = None
+
+    def forget(self, axes="XYZ"):
+        for axis in axes:
+            self.pos[axis] = None
+
+    def step(self, line):
+        """Apply one line. Returns (opcode, words, target position, extrusion delta) for moves, else (opcode, words, None, None)."""
+        code = line.split(";", 1)[0].strip().upper()
+        if not code:
+            return None, {}, None, None
+        parts = code.split()
+        op = re.sub(r"^([GMT])0*(\d)", r"\1\2", parts[0])
+        words = {}
+        for part in parts[1:]:
+            m = re.fullmatch(r"([A-Z])(-?(?:\d+(?:\.\d*)?|\.\d+))", part)
+            if m:
+                words[m.group(1)] = float(m.group(2))
+        if op in ("G90", "G91"):
+            self.relative = op == "G91"
+            self.e_relative = None  # Marlin moves E with G90/G91; unknown until the next M82/M83
+        elif op in ("M82", "M83"):
+            self.e_relative = op == "M83"
+        elif op == "G92":
+            for axis in "XYZE":
+                if axis in words:
+                    self.pos[axis] = words[axis]
+            if not words:
+                self.forget("XYZE")
+        elif op in UNKNOWN_AFTER:
+            given = [a for a in "XYZ" if a in words and op == "G28"]
+            self.forget("".join(given) or UNKNOWN_AFTER[op])
+        elif op in ("G0", "G1", "G2", "G3"):
+            target = dict(self.pos)
+            for axis in "XYZ":
+                if axis in words:
+                    if self.relative is None:
+                        target[axis] = None
+                    elif self.relative:
+                        target[axis] = None if self.pos[axis] is None else self.pos[axis] + words[axis]
+                    else:
+                        target[axis] = words[axis]
+            delta = None
+            if "E" in words:
+                if self.e_relative:
+                    delta = words["E"]
+                    target["E"] = None if self.pos["E"] is None else self.pos["E"] + words["E"]
+                elif self.e_relative is False:
+                    delta = None if self.pos["E"] is None else words["E"] - self.pos["E"]
+                    target["E"] = words["E"]
+                else:
+                    target["E"] = None
+            else:
+                delta = 0.0
+            self.pos = target
+            return op, words, target, delta
+        return op, words, None, None
+
+def toolpath_motion_problems(text, bed, envelope, height=None, z_headroom=1.0):
+    """Motion checks for G-code whose vendor start/end G-code parks the head off the bed (Bambu wiper, purge lane).
+
+    Modal state runs through the whole file. In the prelude and epilogue every move with a known XY position must
+    stay inside envelope (xmin, ymin, xmax, ymax). In the toolpath (see split_toolpath) every move must have a known
+    start for each axis it moves relatively, stay inside the envelope, keep Z between 0 and height + z_headroom,
+    and every possibly extruding move must be at a known position on the bed at 0 < Z <= height. An E move whose
+    extruder mode is unknown counts as extruding. Arcs, homing, probing and XYZ coordinate resets are refused there.
+    """
+    split = split_toolpath(text)
+    if split is None:
+        return ["Cannot locate Orca's toolpath (no layer change or end G-code marker); bounds cannot be checked."]
+    problems = []
+    motion = Motion()
+
+    def outside(x, y):
+        return (x is not None and not envelope[0] <= x <= envelope[2]) or (y is not None and not envelope[1] <= y <= envelope[3])
+
+    for part, lines in (("prelude", split[0]), ("toolpath", split[1]), ("epilogue", split[2])):
+        if part == "toolpath":
+            # The vendor start runs firmware-conditional blocks; never carry a position into the toolpath.
+            motion.forget("XYZ")
+        for number, line in enumerate(lines.splitlines(), 1):
+            op, words, target, delta = motion.step(line)
+            where = f"{part} line {number}: {line.split(';', 1)[0].strip()[:60]}"
+            if op is None:
+                continue
+            if part == "toolpath" and op.startswith("G") and op not in TOOLPATH_GCODES:
+                problems.append(f"Unsupported command in the toolpath ({where}).")
+                continue
+            if part == "toolpath" and op == "G92" and any(a in words for a in "XYZ"):
+                problems.append(f"Coordinate reset in the toolpath ({where}).")
+                continue
+            if target is None:
+                continue
+            if outside(target["X"], target["Y"]):
+                problems.append(f"G-code move leaves the machine envelope at X{_mm(target['X'])} Y{_mm(target['Y'])} ({where}).")
+                continue
+            if part != "toolpath":
+                continue
+            moved = [a for a in "XYZ" if a in words]
+            if any(target[a] is None for a in moved):
+                problems.append(f"Move from an unknown position or positioning mode ({where}).")
+                continue
+            z = target["Z"]
+            if "Z" in words and (z < 0 or (height is not None and z > height + z_headroom)):
+                problems.append(f"G-code move to Z{z:g} is outside 0..{height + z_headroom:g} mm ({where}).")
+                continue
+            extruding = ("E" in words and words["E"] != 0) if delta is None else delta > 0
+            if extruding:
+                if any(target[a] is None for a in "XYZ"):
+                    problems.append(f"Extrusion at an unknown position ({where}).")
+                elif not (0 <= target["X"] <= bed[0] and 0 <= target["Y"] <= bed[1]
+                          and 0 < z and (height is None or z <= height)):
+                    problems.append(f"G-code extrudes off the {bed[0]:g}x{bed[1]:g} mm bed at "
+                                    f"X{target['X']:g} Y{target['Y']:g} Z{z:g} ({where}).")
+    return problems[:10]
+
 def post_slice(gcode, *, ifs_slots=None, tool_slots=None, bed=None, result_json=None,
-               templates=None, profile_paths=()):
-    """Check bounds + effective motion/profile settings and capture provenance."""
+               templates=None, profile_paths=(), envelope=None):
+    """Check bounds + effective motion/profile settings and capture provenance.
+
+    envelope (xmin, ymin, xmax, ymax) is for printers whose vendor start/end G-code moves off the bed:
+    only Orca's toolpath (see split_toolpath) is held to the bed and tool-checked (toolpath_motion_problems).
+    """
     r=Result(); tool_slots=tool_slots or {}; bed,ifs_slots=_printer(bed,ifs_slots)
     if isinstance(gcode, Path):
         text=gcode.read_text(errors="replace")
@@ -151,13 +330,23 @@ def post_slice(gcode, *, ifs_slots=None, tool_slots=None, bed=None, result_json=
             r.block("Unsafe effective setting enable_arc_fitting=1.")
     if "g-code conflicts detected" in low or "slicing result conflict" in low or "gcode path conflicts" in low:
         r.block("Orca reported a G-code conflict; the slice cannot be used. Inspect overlapping geometry/wipe-tower placement (see Orca adapter diagnostic).")
-    tools={int(n) for n in re.findall(r"(?im)^\s*T(\d+)\s*(?:;.*)?$",text)}
+    # With an envelope, the vendor start/end blocks are the printer maker's (Bambu uses T1000 and T255 there);
+    # tools are counted and bounds held to the bed on Orca's toolpath only (toolpath_motion_problems).
+    body = text
+    if envelope is not None:
+        body = toolpath(text)
+        if body is None:
+            body = text
+    tools={int(n) for n in re.findall(r"(?im)^\s*T(\d+)\s*(?:;.*)?$",body)}
     for n in sorted(tools):
         if n not in tool_slots: r.block(f"G-code uses T{n}, but no physical IFS slot mapping is recorded.")
         elif not 1<=int(tool_slots[n])<=ifs_slots: r.block(f"T{n} maps outside the available IFS slots.")
     if tools and max(tools)>=ifs_slots: r.block(f"G-code uses tool T{max(tools)} but only {ifs_slots} IFS slots are available.")
     coords=[]; x=y=0.0
-    for line in text.splitlines():
+    if envelope is not None:
+        for problem in toolpath_motion_problems(text, bed, envelope):
+            r.block(problem)
+    for line in (text.splitlines() if envelope is None else ()):
         m=MOVE.match(line)
         if not m: continue
         vals={k.upper():float(v) for k,v in WORD.findall(m.group(1))}
@@ -251,10 +440,16 @@ def approve_baseline(config, path=BASELINE_PATH):
     Path(path).write_text(json.dumps(current, indent=2, sort_keys=True) + chr(10))
     return current
 
+def _approve_command(path):
+    command = "python3 -m print_buddy.core.approve_baseline approve-baseline <artifact>"
+    if Path(path).resolve() != BASELINE_PATH.resolve():
+        command += f" --baseline config/{Path(path).name}"
+    return command
+
 def enforce_approved_baseline(artifact, path=BASELINE_PATH):
     r = Result()
     if not Path(path).exists():
-        r.warn("Protected-settings baseline missing; slicing allowed. Approve with: python3 -m print_buddy.core.approve_baseline approve-baseline <artifact>")
+        r.warn(f"Protected-settings baseline missing; slicing allowed. Approve with: {_approve_command(path)}")
         return r
     if not isinstance(artifact, (str, Path)) or not Path(artifact).is_file():
         r.warn("Protected-settings artifact unavailable; slicing allowed pending baseline check.")
@@ -263,5 +458,5 @@ def enforce_approved_baseline(artifact, path=BASELINE_PATH):
     actual = _effective_config(artifact)
     for key, record in expected.items():
         if key not in actual or _baseline({key: actual[key]}).get(key, {}).get("sha256") != record.get("sha256"):
-            r.block(f"Protected printer setting {key} differs from the approved baseline. Re-approve deliberately with: python3 -m print_buddy.core.approve_baseline approve-baseline <artifact>")
+            r.block(f"Protected printer setting {key} differs from the approved baseline. Re-approve deliberately with: {_approve_command(path)}")
     return r

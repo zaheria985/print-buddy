@@ -6,6 +6,7 @@ Every action re-reads the printer first and refuses when the state no longer mat
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -315,10 +316,46 @@ def post_with_buttons(token: str, channel_id: str, content: str, kind: str, file
                                                          "User-Agent": "DiscordBot (hermes-3dprinting, 1.0)"})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return 200 <= resp.status < 300
+            ok = 200 <= resp.status < 300
+            if ok:
+                with contextlib.suppress(Exception):
+                    mid = json.loads(resp.read() or b"{}").get("id")
+                    if mid:
+                        with _LOCK:
+                            data = _load()
+                            if aid in data:
+                                data[aid].update(message_id=str(mid), channel_id=str(channel_id))
+                                _save(data)
+            return ok
     except Exception:
         take(aid)
         return False
+
+
+def retire_alerts(token: str, filename: str | None, note: str, kinds: tuple[str, ...] = ("shutdown", "error", "pause")) -> int:
+    """Strip the buttons from stale alerts for this job and say why, so a dead Cancel button is not left behind."""
+    retired = 0
+    with _LOCK:
+        data = _load()
+        stale = {aid: a for aid, a in data.items() if a.get("kind") in kinds
+                 and (filename is None or a.get("filename") == filename)}
+        for aid in stale:
+            data.pop(aid, None)
+        _save(data)
+    for alert in stale.values():
+        mid, chan = alert.get("message_id"), alert.get("channel_id")
+        if not (token and mid and chan):
+            continue
+        req = urllib.request.Request(
+            f"https://discord.com/api/v10/channels/{chan}/messages/{mid}",
+            data=json.dumps({"components": [], "content": f"~~Printer firmware stopped.~~ {note}"[:1990],
+                             "allowed_mentions": {"parse": []}}).encode(),
+            method="PATCH", headers={"Authorization": f"Bot {token}", "Content-Type": "application/json",
+                                     "User-Agent": "DiscordBot (hermes-3dprinting, 1.0)"})
+        with contextlib.suppress(Exception):
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                retired += 200 <= resp.status < 300
+    return retired
 
 
 def post_visual_alert(token: str, channel_id: str, content: str, filename: str, image: Path) -> bool:

@@ -1,0 +1,14 @@
+{
+  "type": "filament",
+  "name": "fixture_filament_common",
+  "from": "system",
+  "instantiation": "false",
+  "filament_type": ["PLA"],
+  "filament_density": ["1.2"],
+  "filament_flow_ratio": ["0.97"],
+  "filament_colour": ["#808080"],
+  "nozzle_temperature": ["215"],
+  "nozzle_temperature_initial_layer": ["215"],
+  "filament_start_gcode": ["; fixture filament start\nM900 K0.02\n"],
+  "filament_end_gcode": ["; fixture filament end\nM900 K0\n"]
+}

@@ -1,0 +1,15 @@
+{
+  "type": "machine",
+  "name": "fixture_machine_common",
+  "from": "system",
+  "instantiation": "false",
+  "gcode_flavor": "marlin",
+  "nozzle_type": "stainless_steel",
+  "z_hop": ["0.4"],
+  "z_hop_types": ["Auto Lift"],
+  "travel_slope": ["3"],
+  "retraction_length": ["0.8"],
+  "bed_exclude_area": ["0x0", "20x0", "20x20", "0x20"],
+  "change_filament_gcode": "; fixture: no filament change\n",
+  "layer_change_gcode": "; fixture layer [layer_num]\n"
+}

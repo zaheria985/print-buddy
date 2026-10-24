@@ -279,7 +279,7 @@ def test_discord_clarify_cap_is_scoped_to_3dprinting_discord():
         ('pre_tool_call', plugin.cap_discord_clarifications),
         ('pre_tool_call', plugin.guard_terminal_loop),
     ]
-    assert plugin.receipt_text('https://makerworld.com/model bed clear') == 'Got the link. I’m checking the files and preparing the slice.'
+    assert plugin.receipt_text('https://makerworld.com/model bed clear') is None  # preview + picker acknowledge links
     assert plugin.clarify_receipt({'outcome': 'cancelled'}) is None
 
 

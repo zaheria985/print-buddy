@@ -33,15 +33,15 @@ def test_single_color_successful_flow_messages_and_order(env):
     """After bed-clear approved, prep message is sent before start, followed by started confirmation."""
     adapter, result, receipt = run_flow(env, [1, 0, 0])  # single color, slot 1, slice and print now
 
-    assert len(adapter.sent) == 2, f'Expected prep and one start message: {adapter.sent}'
+    assert len(adapter.log) == 2, f'Expected prep and one start message: {adapter.log}'
 
-    assert not any(m.startswith('Sliced:') for m in adapter.sent)
-    assert any(PREP_TEXT in m for m in adapter.sent), f'Missing preparation message in: {adapter.sent}'
-    assert any(m.startswith('Print started:') for m in adapter.sent), f'Missing started confirmation in: {adapter.sent}'
+    assert not any(m.startswith('Sliced:') for m in adapter.log)
+    assert any(PREP_TEXT in m for m in adapter.log), f'Missing preparation message in: {adapter.log}'
+    assert any(m.startswith('Print started:') for m in adapter.log), f'Missing started confirmation in: {adapter.log}'
 
     # No separate slice narration in the start flow.
-    prep_idx = next(i for i, m in enumerate(adapter.sent) if PREP_TEXT in m)
-    start_idx = next(i for i, m in enumerate(adapter.sent) if m.startswith('Print started:'))
+    prep_idx = next(i for i, m in enumerate(adapter.log) if PREP_TEXT in m)
+    start_idx = next(i for i, m in enumerate(adapter.log) if m.startswith('Print started:'))
 
     assert prep_idx < start_idx, f'Wrong order: prep={prep_idx}, start={start_idx}'
 
@@ -95,13 +95,13 @@ def test_refused_start_sends_prep_then_precise_failure_no_printing_claim(env, mo
 
     adapter, result, receipt = run_flow(env, [1, 0, 0])
 
-    assert len(adapter.sent) == 2, f'Expected prep and one refusal message: {adapter.sent}'
+    assert len(adapter.log) == 2, f'Expected prep and one refusal message: {adapter.log}'
 
-    prep_idx = next(i for i, m in enumerate(adapter.sent) if PREP_TEXT in m)
+    prep_idx = next(i for i, m in enumerate(adapter.log) if PREP_TEXT in m)
 
-    assert not any(m.startswith('Sliced:') for m in adapter.sent)
-    assert not any('print started' in m.lower() for m in adapter.sent)
-    assert adapter.sent[1].startswith('REFUSED:')
+    assert not any(m.startswith('Sliced:') for m in adapter.log)
+    assert not any('print started' in m.lower() for m in adapter.log)
+    assert adapter.log[1].startswith('REFUSED:')
 
     # Receipt reflects refusal
     assert receipt['status'] == 'START_REFUSED'
@@ -117,7 +117,7 @@ def test_duplicate_event_deduplication_and_no_duplicate_messages(env):
     """A duplicate model-link event does not trigger a second start or duplicate Discord messages."""
     adapter1, result1, receipt1 = run_flow(env, [1, 0, 0], mid='dedup-1')
     assert len(env.starts) == 1
-    initial_sent_count = len(adapter1.sent)
+    initial_sent_count = len(adapter1.log)
     assert initial_sent_count == 2
 
     # Send identical event with a new adapter
@@ -168,15 +168,15 @@ def test_multicolor_mapped_flow_lifecycle_and_messages(env, monkeypatch):
     assert len(env.starts) == 1
 
     # Messages check
-    has_prep = any(PREP_TEXT in m for m in adapter.sent)
-    has_started = any(m.startswith('Print started:') for m in adapter.sent)
+    has_prep = any(PREP_TEXT in m for m in adapter.log)
+    has_started = any(m.startswith('Print started:') for m in adapter.log)
 
-    assert has_prep, f'Missing preparation message in: {adapter.sent}'
-    assert has_started, f'Missing started confirmation in: {adapter.sent}'
+    assert has_prep, f'Missing preparation message in: {adapter.log}'
+    assert has_started, f'Missing started confirmation in: {adapter.log}'
 
-    assert not any('Sliced:' in m for m in adapter.sent)
-    prep_idx = next(i for i, m in enumerate(adapter.sent) if PREP_TEXT in m)
-    start_idx = next(i for i, m in enumerate(adapter.sent) if m.startswith('Print started:'))
+    assert not any('Sliced:' in m for m in adapter.log)
+    prep_idx = next(i for i, m in enumerate(adapter.log) if PREP_TEXT in m)
+    start_idx = next(i for i, m in enumerate(adapter.log) if m.startswith('Print started:'))
     assert prep_idx < start_idx
 
 
@@ -192,10 +192,10 @@ def test_multicolor_refused_start_sends_prep_then_precise_failure(env, monkeypat
     # picks: per_part (0), Shell->slot 1 (0), Eyes->slot 3 (1), Slice and print now (0)
     adapter, result, receipt = run_flow(env, [0, 0, 1, 0])
 
-    prep_idx = next(i for i, m in enumerate(adapter.sent) if PREP_TEXT in m)
-    fail_idx = next(i for i, m in enumerate(adapter.sent) if 'REFUSED:' in m)
+    prep_idx = next(i for i, m in enumerate(adapter.log) if PREP_TEXT in m)
+    fail_idx = next(i for i, m in enumerate(adapter.log) if 'REFUSED:' in m)
     assert prep_idx < fail_idx
-    assert not any('Print started:' in m for m in adapter.sent)
+    assert not any('Print started:' in m for m in adapter.log)
     assert receipt['status'] == 'START_REFUSED'
     assert receipt['started'] is False
 
@@ -214,8 +214,8 @@ def test_slice_only_then_start_button_lifecycle(env, monkeypatch):
     assert len(env.starts) == 1
 
     # The noisy 'Sliced:' post was retired; the Start button question is the only pre-start prompt.
-    assert not any(m.startswith('Sliced:') for m in adapter.sent)
-    prep_idx = next(i for i, m in enumerate(adapter.sent) if PREP_TEXT in m)
-    start_idx = next(i for i, m in enumerate(adapter.sent) if m.startswith('Print started:'))
-
-    assert prep_idx < start_idx
+    assert not any(m.startswith('Sliced:') for m in adapter.log)
+    # 'Preparing to start' rides on the single Stop/Uploading prompt, not a separate post.
+    assert sum(PREP_TEXT in m for m in adapter.log) == 1
+    assert not any(m.startswith(PREP_TEXT) and 'Uploading' not in m for m in adapter.log)
+    assert any(m.startswith('Print started:') for m in adapter.log)

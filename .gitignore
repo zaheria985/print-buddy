@@ -7,3 +7,7 @@ config/local.yaml
 config/after-update.sh
 .slicer-work/
 .claude/worktrees/
+
+# Docker deployment state and secrets
+/.env
+/data/

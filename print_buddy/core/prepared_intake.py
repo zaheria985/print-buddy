@@ -6,6 +6,7 @@ import contextlib
 import contextvars
 import hashlib
 import json
+import logging
 import re
 from pathlib import Path
 import sys
@@ -13,8 +14,8 @@ import time
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
-from .. import printers, settings
-from . import _external, split_fit
+from .. import logs, printers, settings
+from . import _external, delivery, owned_worker, split_fit
 
 BED = settings.current()['printer']['bed_mm']
 IFS_SLOTS = settings.current()['printer']['ifs_slots']
@@ -23,12 +24,26 @@ print_next = _external.lazy('print_next')
 from .link_intake import ask, model_link, has_duration_question  # noqa: E402
 from .quantity_selection import quantity_options, parse_quantity  # noqa: E402
 from .background_slice import drop_runner, runner_for, slice_binding  # noqa: E402
+from .slice_recipe import RECIPE_VERSION, binding_sha256  # noqa: E402
 
 
 _OFFLOAD = {('model_job', 'audit'), ('model_job', 'slice_job'), ('source_colors', 'inventory'),
             ('orca_adapter', 'orca_plate_capacity'), ('orca_adapter', 'fit_options'),
-            ('model_job', 'per_part_fit_options'), ('plate_merge', 'full_size_split_possible')}
+            ('model_job', 'per_part_fit_options'), ('plate_merge', 'full_size_split_possible'),
+            ('geometry_layout', 'inspect_geometry'), ('geometry_layout', 'arrange_and_export'),
+            ('geometry_layout', 'probe_single_plate_rearrange'),
+            ('cad_split', 'check_source_against_split_plan'), ('cad_split', 'prepare_cad_split')}
+# Steps that run the slicer share one lane; the geometry-only steps share a small general lane.
+_SLICER_STEPS = {('model_job', 'slice_job'), ('orca_adapter', 'orca_plate_capacity'), ('orca_adapter', 'fit_options')}
+_STEP_LABELS = {'slice_job': 'slicing', 'audit': 'the model check', 'inventory': 'the color check',
+                'orca_plate_capacity': 'the bed fit check', 'fit_options': 'the bed fit check',
+                'per_part_fit_options': 'the per-part fit check', 'full_size_split_possible': 'the split check',
+                'inspect_geometry': 'the geometry check', 'arrange_and_export': 'the layout',
+                'probe_single_plate_rearrange': 'the layout check',
+                'check_source_against_split_plan': 'the split check', 'prepare_cad_split': 'the split'}
 
+
+logger = logging.getLogger(__name__)
 
 STOP_LABEL = "Stop"
 STOP_CUSTOM_ID = "pbstop:"
@@ -51,6 +66,8 @@ async def _with_stop(adapter, source, key, metadata, text, work, *, allow_stop=F
     if "picks" in adapter_state or "clicks" in adapter_state:
         return await work
     if not allow_stop:
+        if not text:
+            return await work
         status = text
         for suffix in (" Press Stop to cancel before it starts.", " Press Stop to cancel."):
             if status.endswith(suffix):
@@ -119,21 +136,24 @@ async def _heavy(func, *args, **kwargs):
 
     Threads are not enough: large 3MF XML parsing holds the GIL for ~10 s stretches and starves the
     gateway loop past Discord's 3 s interaction deadline. Substituted callables (tests) run in a thread.
+    The child is owned: it has a deadline and an output limit, and a cancel stops its process group.
     """
     import importlib
     mod, name = getattr(func, '__module__', None), getattr(func, '__name__', None)
     short = (mod or '').rsplit('.', 1)[-1]
     real = (short, name) in _OFFLOAD and getattr(importlib.import_module(mod), name, None) is func
     if not real:
-        return await asyncio.to_thread(func, *args, **kwargs)
+        return await owned_worker.in_thread(func, *args, **kwargs)
     def plain(v):
         return str(v) if isinstance(v, Path) else v
     payload = json.dumps({'module': short, 'func': name, 'args': [plain(a) for a in args],
                           'kwargs': {k: plain(v) for k, v in kwargs.items()}}).encode()
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable, '-m', 'print_buddy.core.heavy_worker', cwd=str(settings.ROOT),
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    out, err = await proc.communicate(payload)
+    slicer = (short, name) in _SLICER_STEPS
+    # A slice worker leaves a record in its intake folder, so a restart mid-slice can be explained.
+    record = Path(args[0]).parent / owned_worker.RECORD if (short, name) == ('model_job', 'slice_job') else None
+    out, err = await owned_worker.run(
+        [sys.executable, '-m', 'print_buddy.core.heavy_worker'], payload, label=_STEP_LABELS.get(name, name),
+        lane=owned_worker.SLICER if slicer else owned_worker.GENERAL, cwd=str(settings.ROOT), record=record)
     try:
         reply = json.loads(out.decode().rstrip().rsplit('\n', 1)[-1])
     except (ValueError, IndexError):
@@ -252,9 +272,8 @@ def preview_sentence(job, row):
         from . import model_job as mj
         site = mj.source_site_estimate(row)
         if site:
-            printer = str((row or {}).get('site_printer') or '').strip()
             plates = len((row or {}).get('plates') or [])
-            text += (f" Model page estimate{f' (for {printer})' if printer else ''}: about {mj.human_dur(site[0])}"
+            text += (f" Model page estimate: about {mj.human_dur(site[0])}"
                      f" and {round(site[1])} g of filament{f' over {plates} plates' if plates > 1 else ''}."
                      ' The AD5X figure after slicing will differ somewhat.')
         else:
@@ -277,16 +296,20 @@ def _pct(scale):
 
 
 def fit_choice_rows(options):
-    """At most four short choices, with full-size split before orientation/shrink."""
+    """At most four short choices, with full-size rearrange/split before orientation/shrink."""
     rows = []
+    rearrange = options.get('rearrange_100')
+    if rearrange:
+        rows.append({'kind': 'rearrange', 'label': '100% · rearrange 1 plate',
+                     'scale': 1.0, 'rearrange_100': rearrange})
     split_plan = options.get('split_plan')
-    if split_plan:
+    if split_plan and len(rows) < 2:
         rows.append({'kind': 'split', 'label': f"100% · split {len(split_plan['plates'])} plates",
                      'plates': split_plan['plates'], 'scale': 1.0})
-    elif options.get('full_size_split'):
+    elif options.get('full_size_split') and len(rows) < 2:
         rows.append({'kind': 'split', 'label': 'Split plates at 100%', 'scale': 1.0})
-    split_available = any(row['kind'] == 'split' for row in rows)
-    for alt in (options.get('rotations') or [])[:1 if split_available else 2]:
+    full_size_available = any(row['kind'] in ('split', 'rearrange') for row in rows)
+    for alt in (options.get('rotations') or [])[:1 if full_size_available else 2]:
         scale = float(alt['scale'])
         if scale < 0.995:
             continue
@@ -309,12 +332,14 @@ def fit_choice_rows(options):
 def _fit_choice_reply(text, rows):
     """Resolve typed fit intent only when it names one available action."""
     value = str(text or '').strip().casefold()
-    if value in {'split', 'separate', 'split plates'}:
+    if value in {'rearrange', 'rearrange 1 plate', 'rearrange plate', 'pack'}:
+        matches = [i for i, row in enumerate(rows) if row['kind'] == 'rearrange']
+    elif value in {'split', 'separate', 'split plates'}:
         matches = [i for i, row in enumerate(rows) if row['kind'] == 'split'
                    or (row['kind'] == 'painted' and 'split' in row['label'])]
     elif value in {'100%', '100', 'full', 'full size'} or 'full size' in value:
-        matches = [i for i, row in enumerate(rows) if row['kind'] == 'split'
-                   or (row['kind'] == 'painted' and row['scale'] >= 1.0)]
+        matches = [i for i, row in enumerate(rows) if row['kind'] in ('rearrange', 'split')
+                   or (row['kind'] in ('painted', 'rotate') and row['scale'] >= 1.0)]
     elif value in {'cancel', 'stop', "don't print"}:
         matches = [i for i, row in enumerate(rows) if row['kind'] == 'cancel']
     elif value in {'shrink', 'smaller'}:
@@ -344,7 +369,7 @@ def fit_question(title, options):
     extent_text = ' × '.join(f'{v:g}' for v in extent[:3]) + ' mm' if extent else 'measured dimensions unavailable'
     checked = options.get('orientations_checked') or (parts[0].get('orientations_checked') if parts else None)
     orientations = ', '.join(checked or ['authored XY', 'verified rotations'])
-    lines = [f'{part_name} ({extent_text}) does not fit the AD5X bed full size. Orientations checked: {orientations}.']
+    lines = [f'{part_name} ({extent_text}) does not fit the bed full size.']
     if scales:
         lines.append(f'As authored it fits at {_pct(scales[0])} max.')
     for alt in rotations[:2]:
@@ -361,13 +386,6 @@ def fit_question(title, options):
         lines.append('Full-size option: separate already-independent parts onto the original plates (100%).')
     if options.get('brim_policy'):
         lines.append('Tight-fit brim policy: ' + options['brim_policy'].get('label', 'No brim') + '.')
-    lines.append('Options: rotate to a listed verified orientation; separate only already-independent parts (100%); '
-                 f'shrink to the exact listed percentage ({_pct(scales[0]) if scales else "no verified scale"}); '
-                 'or cut and join manually (future option, not implemented; https://github.com/catduckgnaf/print-buddy/issues/83).')
-    if options.get('fit_search_deferred'):
-        lines.append('Fine scale search for painted multi-plate jobs is deferred to keep preparation bounded; the listed options are the verified safe choices.')
-    lines.append('Margin note: the edge margin is bed-edge clearance; the 10 mm object gap is object-to-object spacing. '
-                 'They are separate budgets and each is applied once. Brim width and non-normal lift sweep consume bed-edge clearance only.')
     lines.append('Pick a fit option, or type split / 100% / shrink / cancel.')
     return '\n'.join(lines)
 
@@ -471,6 +489,26 @@ def resume_job(saved):
     return job
 
 
+def _saved_folder(saved):
+    """The intake folder of an archived job: the nearest parent of its source that holds JOB.json."""
+    source = (saved or {}).get('downloaded_file')
+    return next((p for p in Path(source).parents if (p / 'JOB.json').is_file()), None) if source else None
+
+
+def interrupted_note(saved):
+    """One sentence when Print Buddy stopped while this saved job was being prepared, else None.
+
+    The record only explains what happened. An interrupted preparation is never resumed with its
+    old approvals: reuse_job and resume_job carry no approval, so every confirmation is asked again.
+    """
+    folder = _saved_folder(saved)
+    record = owned_worker.interrupted(folder) if folder else None
+    if not record:
+        return None
+    return (f"Its last preparation was interrupted during {record.get('step') or 'a heavy step'} when "
+            'Print Buddy stopped. That run is not reused; every choice and confirmation is asked again.')
+
+
 _LIVE_KEY = contextvars.ContextVar('prepared_intake_live_key', default=None)
 
 
@@ -507,11 +545,126 @@ async def _ask(adapter, source, key, question, choices, timeout=None, **kwargs):
     return await ask(adapter, source, key, question, list(choices), timeout, live_key=live_key, **kwargs)
 
 
+_NOISE = re.compile(r'^(?:TIMING \{|G-CODE OK:)')
+
+
+def _refusal_text(tail):
+    """Chat gets the refusal, not the TIMING and preflight lines that belong in the job log."""
+    lines = [ln for ln in str(tail or '').splitlines() if ln.strip() and not _NOISE.match(ln.strip())]
+    return '\n'.join(lines) or 'Not started.'
+
+
+def _restart_helps(tail):
+    """A stale heater target, stuck screen or leftover job: a force restart clears these."""
+    text = str(tail or '').casefold()
+    return 'refused' in text and any(w in text for w in (
+        'idle guard', 'targettemp', 'paused', 'cancelled', 'canceled', 'shutdown', 'klippy',
+        'stale', 'retained job', 'not idle', 'state is error'))
+
+
+async def _offer_force_restart(adapter, source, key, message, timeout=None):
+    """Offer the existing safe REBOOT flow; never start the print afterwards."""
+    pc = _external.load('print_control')
+    question = (message + '\n\nThe printer looks stuck from a previous job. Force restart clears it '
+                '(and wipes any Resume on the screen). The print will not start by itself afterwards.')
+    try:
+        answer = await _ask(adapter, source, key, question, [pc.REBOOT_LABEL, pc.CANCEL_REBOOT_LABEL], timeout)
+    except Exception:
+        return message
+    if answer != 0:  # _ask returns the button index
+        return 'Not restarted. Nothing uploaded or started.'
+    with contextlib.suppress(Exception):
+        await adapter.send(chat_id=source.chat_id, content='Force restarting the printer now, about two minutes.',
+                           metadata=getattr(source, 'metadata', None))
+    ok, result = await asyncio.to_thread(pc.force_reboot)
+    return result + (' Send the link or press Print again to retry.' if ok else '')
+
+
 async def _pick_plate(adapter, source, key, parts, timeout=None):
     """One picker for a split job: index of the plate to print first, or None for Cancel."""
     labels = [print_next.plate_choice_label(part, part.get('plate')) for part in parts]
     picked = await _ask(adapter, source, key, 'Which plate prints first?', labels + ['Cancel'], timeout)
     return picked if picked < len(parts) else None
+
+
+async def _delivery_menu(adapter, source, key, metadata, timeout, question, enabled, receipt, receipt_path,
+                         jp, gcodes):
+    """Post-slice choices from the vendor profile. 0 means Start was pressed; anything else means stop here.
+
+    Start (only when the vendor can print) is the same per-job bed-clear button as before and is the only
+    way to print. Each delivery runs at most once to completion, then leaves the menu; Done ends it.
+    """
+    can_print = delivery.PRINTER in enabled
+    offered = [m for m in enabled if m != delivery.PRINTER]
+    while True:
+        pending = [m for m in offered if not delivery.done(receipt, m)]
+        if not pending and not can_print:
+            return 1
+        choices = (([print_next.START_LABEL] if can_print else []) + [delivery.LABELS[m] for m in pending]
+                   + [delivery.DONE_LABEL])
+        picked = await _ask(adapter, source, key, question, choices, timeout)
+        label = choices[picked]
+        if label == print_next.START_LABEL:
+            return 0
+        if label == delivery.DONE_LABEL:
+            return 1
+        method = pending[picked - (1 if can_print else 0)]
+        await _deliver(adapter, source, metadata, method, receipt, jp, gcodes, pending)
+        receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
+        question = 'Anything else for this slice?' + (' Start uploads and prints it immediately.' if can_print else '')
+
+
+async def _deliver(adapter, source, metadata, method, receipt, jp, gcodes, pending):
+    """Run one delivery and report exactly what happened. Never uploads to or starts a printer."""
+    async def say(text):
+        return await adapter.send(chat_id=source.chat_id, content=text, metadata=metadata)
+    try:
+        job = json.loads(Path(jp).read_text())
+        artifacts = delivery.bound_artifacts(job, gcodes, receipt.get('gcode_sha256') or {})
+        if method == delivery.BAMBU_HANDOFF:
+            packages = await asyncio.to_thread(delivery.bambu_handoff, job, artifacts)
+            delivery.record(receipt, method, [{'source': p, 'sent': None, 'ok': True} for p in packages], True,
+                            'packaged')
+            where = (" Use 'Send the files here' to download it." if delivery.DISCORD in pending
+                     else ' On the Print Buddy host: ' + ', '.join(str(p) for p in packages) + '.')
+            names = ', '.join(p.name for p in packages)
+            await say(f'Bambu package ready: {names}.{where}\n'
+                      + delivery.handoff_note(delivery.current_model()))
+            return
+        files = await asyncio.to_thread(delivery.files_for_discord, job, artifacts)
+        limit = delivery.upload_limit()
+        already = delivery.delivered(receipt, method)
+        todo = [f for f in files if str(f) not in already]
+        plan = await asyncio.to_thread(delivery.discord_plan, todo, limit, Path(jp).parent / 'delivery')
+        items, failed = [], []
+        for item in plan:
+            label = f'Plate {files.index(item.source) + 1} of {len(files)}: {item.source.name}' if len(files) > 1 else None
+            text = delivery.discord_message(item, limit, label)
+            if item.mode == 'too_big':
+                await say(text)
+                items.append({'source': item.source, 'sent': None, 'ok': False, 'reason': 'too_big'})
+                continue
+            try:
+                result = await say(text)
+                ok = getattr(result, 'success', True) is not False
+                error = getattr(result, 'error', None) or 'Discord did not accept the upload'
+            except Exception as exc:  # a transport error is a failed delivery, not a crash
+                ok, error = False, str(exc)
+            items.append({'source': item.source, 'sent': item.file, 'ok': ok, **({} if ok else {'reason': error})})
+            if not ok:
+                failed.append(f'{item.source.name} ({error})')
+        sent = sum(1 for i in items if i['ok']) + len(already)
+        big = [i['source'].name for i in items if i.get('reason') == 'too_big']
+        delivery.record(receipt, method, items, not failed, f'{sent} of {len(files)} sent')
+        parts = [f'Sent {sent} of {len(files)} file(s) here.']
+        if big:
+            parts.append('Too big for Discord: ' + ', '.join(big) + '.')
+        if failed:
+            parts.append('Failed: ' + '; '.join(failed) + ". Pick 'Send the files here' again to retry those.")
+        await say(' '.join(parts) + ' Nothing was uploaded to a printer or started.')
+    except delivery.DeliveryRefused as exc:
+        delivery.record(receipt, method, [], False, str(exc))
+        await say(f'Not delivered: {exc}. Nothing was uploaded to a printer or started.')
 
 
 async def _send_render_preview(adapter, source, path, scale=1.0, rotation=None, bed=tuple(BED)):
@@ -583,6 +736,8 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
     key = 'model-link:' + iid
     event_metadata = getattr(event, 'metadata', None) or {}
     live_token = _LIVE_KEY.set(event_metadata.get('live_session_key') or key)
+    log_token = logs.bind(intake=iid)
+    logger.info('intake started origin=%s', logs.redact(str(origin)))
     metadata = {'thread_id': source.thread_id} if source.thread_id else None
     jp = None
     try:
@@ -593,9 +748,13 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
             else:
                 done = reuse.get('sliced_at') and (reuse.get('filament_selection') or {}).get('color')
                 when = f" (last sliced in {reuse['filament_selection']['color']})" if done else ''
+                interrupted = interrupted_note(reuse)
                 pick = await _ask(adapter, source, key, f"Did you mean {reuse.get('title') or 'the last model'}{when}? "
-                                 'I will slice it again from the saved file, no download.',
+                                 'I will slice it again from the saved file, no download.'
+                                 + (f' {interrupted}' if interrupted else ''),
                                  ['Yes, slice it again', "No, I'll send a link"], timeout)
+                if interrupted:
+                    owned_worker.clear(_saved_folder(reuse))  # explained once; the new intake has its own folder
                 if pick != 0:
                     receipt.update(status='DECLINED_REPRINT')
                     receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
@@ -670,7 +829,7 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
         fetch = copy_upload if (reuse or job['site'] == 'upload') else {'makerworld': mj.maker_download}.get(
             job['site'], mj.printables_download)
         path = await _with_stop(
-            adapter, source, key, metadata, "Downloading the model. Press Stop to cancel.",
+            adapter, source, key, metadata, None,
             asyncio.to_thread(fetch, job, chosen, folder / 'source'))
         job['downloaded_file'] = str(path)
         if job['site'] == 'upload':
@@ -756,6 +915,7 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
             capacity = await _with_stop(adapter, source, key, metadata, "Checking whether it fits the bed. Press Stop to cancel.",
                                         _heavy(orca_adapter.orca_plate_capacity, path, state))
         except Exception as exc:
+            logger.exception('fit check failed; intake is resumable')
             receipt['status'] = 'FIT_UNKNOWN'
             receipt['fit_error'] = str(exc)
             receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
@@ -836,13 +996,19 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
                     options['extent_mm'] = failing[0]['extent_mm']
                     options['orientations_checked'] = ['authored XY (measured)'] + [r.get('label', 'rotation') for r in options.get('rotations') or []]
             full_size_split = False
+            rotate_100 = any(float(r.get('scale') or 0) >= 0.995 and not r.get('supports')
+                             for r in options.get('rotations') or [])
             try:
+                if rotate_100:
+                    raise LookupError('a plain 100% rotation fits; skip the split checks')
                 full_size_split = await _with_stop(adapter, source, key, metadata, "Checking whether it splits at full size. Press Stop to cancel.",
                                                    _heavy(plate_merge.full_size_split_possible, path, manifest,
                                                           int((state.get('bed_mm') or BED)[0])))
             except Exception:
                 full_size_split = False
             try:
+                if rotate_100:
+                    raise LookupError('a plain 100% rotation fits; skip the split checks')
                 split_plan = await _with_stop(adapter, source, key, metadata, "Checking whether it splits at full size. Press Stop to cancel.",
                                              _heavy(split_fit.split_plan_100, path,
                                                     int((state.get('bed_mm') or BED)[0])))
@@ -893,7 +1059,10 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
                           '. Choose a fit option, or type split / 100% / shrink / cancel.')
             else:
                 prompt = fit_question(title, options)
-            while True:
+            # Fits at 100% by rotation alone (no supports): just do it, no question, no announcement.
+            silent = next((r for r in picked if r['kind'] == 'rotate' and r['scale'] >= 0.995
+                           and not r.get('supports')), None)
+            while silent is None:
                 scale_pick = await _ask(adapter, source, key, prompt,
                                         [row['label'] for row in picked], timeout,
                                         parser=lambda text: _fit_choice_reply(text, picked))
@@ -907,6 +1076,9 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
                 except Exception as exc:
                     await adapter.send(chat_id=source.chat_id,
                         content=f'Preview unavailable: {exc}. No blank image was sent.', metadata=metadata)
+            if silent is not None:
+                row = silent
+                receipt['fit_auto_rotated'] = True
             if row['kind'] == 'cancel':
                 receipt['status'] = 'CANCELLED_OVERSIZED'
                 receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
@@ -917,21 +1089,31 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
             if options.get('brim_policy'):
                 latest['fit_brim_policy'] = options['brim_policy']
                 receipt['fit_brim_policy'] = options['brim_policy']
+            if row['kind'] == 'rearrange':
+                latest['scale'] = 1.0
+                latest['full_size_rearrange_plan'] = row.get('rearrange_100') or {'rearrange_plate': True}
+                latest.pop('orientation', None)
+                latest.pop('full_size_split_plan', None)
+                receipt['full_size_rearrange'] = True
+                receipt['scale'] = 1.0
+                receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
+                mj.write_job(folder, latest)
             if row['kind'] == 'split':
                 latest['plate_mode'] = 'separate'
                 latest['scale'] = 1.0
                 if row.get('plates'):
                     latest['full_size_split_plan'] = {'plates': row['plates']}
                 latest.pop('orientation', None)
+                latest.pop('full_size_rearrange_plan', None)
                 receipt['full_size_split'] = True
                 receipt['scale'] = 1.0
                 receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
                 mj.write_job(folder, latest)
             selected_scale = row.get('scale', 1.0)
             rotation = row.get('rotation')
-            if row['kind'] == 'split':
-                # Capacity on the unsplit source is zero by definition here; each
-                # source plate was independently checked at authored size.
+            if row['kind'] in ('split', 'rearrange'):
+                # Capacity on the unsplit/unarranged source is zero by definition here; each
+                # rearranged or split plate was verified at authored size.
                 capacity = 1
             else:
                 capacity = await _with_stop(adapter, source, key, metadata, "Checking whether it fits the bed. Press Stop to cancel.",
@@ -984,8 +1166,9 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
         # so a job that never asked for G-code keeps none.
         early = runner_for(jp)
         binding = slice_binding(latest, decisions['source_sha256'])
+        recipe_sha = binding_sha256(binding)  # the worker refuses to slice any other recipe
         await early.start(jp, binding, lambda job_path, work, runner, copies=chosen_quantity:
-                          _heavy(mj.slice_job, str(job_path), **(
+                          _heavy(mj.slice_job, str(job_path), recipe_sha256=recipe_sha, **(
                               {'copies': copies} if copies and int(copies) > 1 else {})))
         await early.started.wait()  # armed before the question goes up
         multi = len(manifest['parts']) > 1
@@ -1011,11 +1194,17 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
                          f"~{mj.human_dur(estimate_s + 300)}")
         if chosen_quantity and chosen_quantity != 1:
             estimate_text = f"{chosen_quantity} copies · " + estimate_text
+        # Post-slice choices come from the printer's vendor profile ([delivery] methods). Printing is
+        # offered only where the vendor has a connection (never for an offline Bambu Lab printer).
+        enabled = delivery.methods()
+        can_print = delivery.PRINTER in enabled
+        first_labels = [print_label, 'Slice only', 'Stop with colors saved', cancel_label][0 if can_print else 1:]
         choice = await _ask(adapter, source, key,
             f'{names} · {estimate_text}'
             + ('\n' + spool_text if spool_text else '') + caveat,
-            [print_label, 'Slice only', 'Stop with colors saved', cancel_label], timeout,
+            first_labels, timeout,
             on_shown=early.release.set)
+        choice = choice if can_print else choice + 1
         if choice in (2, 3):
             await early.discard()  # the early slice was for a job that will not print
             receipt['status'] = 'CANCELLED' if choice == 3 else 'COLORS_SAVED_STOPPED'
@@ -1030,23 +1219,14 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
                 or slice_binding(latest, decisions['source_sha256']) != binding):
             await early.discard()  # the slice was for decisions that no longer match
             raise ValueError('source/job changed before slice approval; no handoff')
+        logger.info('slice approved')
         receipt.update(status='SLICE_APPROVED', slice_attempt=1,
                        slice_approval={'intake_id': iid, 'source_sha256': decisions['source_sha256'],
-                                       'decisions_sha256': mj.decisions_digest(validated), 'attempt': 1})
+                                       'decisions_sha256': mj.decisions_digest(validated), 'attempt': 1,
+                                       'recipe_version': RECIPE_VERSION, 'recipe_sha256': recipe_sha})
         receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
         mj._timing(jp, 'intake_slice_requested')
-        prep_sent = False
-        if choice == 0:
-            # Acknowledge the tap before the slow slice, so a slicer failure is
-            # never the first thing anyone hears. This is the only message
-            # until "Print started" (or the failure that replaces it).
-            pre_no = latest.get('print_number')
-            pre_total = (f"~{mj.human_dur(estimate_s + 300)} total" if estimate_s is not None
-                         else 'estimate after slicing')
-            await adapter.send(chat_id=source.chat_id, metadata=metadata,
-                               content=' · '.join(['Preparing to start'] + ([f'Print #{pre_no}'] if pre_no else [])
-                                                  + [pre_total]))
-            prep_sent = True
+        prep_sent = False  # one combined Preparing + Uploading message after slicing, with the real estimate
         try:
             out = await early.take(binding)  # finished while the question was up, or still running
             if out is None and early.error is not None:
@@ -1054,11 +1234,14 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
             if out is None:
                 if chosen_quantity and chosen_quantity > 1:
                     out = await _with_stop(adapter, source, key, metadata, "Slicing. Press Stop to cancel.",
-                                           _heavy(mj.slice_job, str(jp), copies=chosen_quantity))
+                                           _heavy(mj.slice_job, str(jp), copies=chosen_quantity, recipe_sha256=recipe_sha),
+                                           allow_stop=True)  # nothing uploaded yet, so Stop is safe
                 else:
                     out = await _with_stop(adapter, source, key, metadata, "Slicing. Press Stop to cancel.",
-                                           _heavy(mj.slice_job, str(jp)))
+                                           _heavy(mj.slice_job, str(jp), recipe_sha256=recipe_sha),
+                                           allow_stop=True)
         except Exception as slice_error:
+            logger.exception('slice failed')
             # A failed attempt has no reusable slice approval or G-code. Retry is a
             # separate button action, and its output still needs a fresh start button.
             await early.discard()
@@ -1084,7 +1267,8 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
             attempt = int(receipt.get('slice_attempt') or 1) + 1
             receipt.update(status='SLICE_APPROVED', slice_attempt=attempt,
                            slice_approval={'intake_id': iid, 'source_sha256': decisions['source_sha256'],
-                                           'decisions_sha256': mj.decisions_digest(validated), 'attempt': attempt})
+                                           'decisions_sha256': mj.decisions_digest(validated), 'attempt': attempt,
+                                           'recipe_version': RECIPE_VERSION, 'recipe_sha256': recipe_sha})
             receipt.pop('slice_error', None)
             receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
             # A prior "slice and print" choice applies only to the failed output.
@@ -1093,11 +1277,12 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
             try:
                 if chosen_quantity and chosen_quantity > 1:
                     out = await _with_stop(adapter, source, key, metadata, "Retrying the slice. Press Stop to cancel.",
-                                           _heavy(mj.slice_job, str(jp), copies=chosen_quantity))
+                                           _heavy(mj.slice_job, str(jp), copies=chosen_quantity, recipe_sha256=recipe_sha))
                 else:
                     out = await _with_stop(adapter, source, key, metadata, "Retrying the slice. Press Stop to cancel.",
-                                           _heavy(mj.slice_job, str(jp)))
+                                           _heavy(mj.slice_job, str(jp), recipe_sha256=recipe_sha))
             except Exception as retry_error:
+                logger.exception('slice retry failed')
                 await early.discard()
                 receipt.update(status='SLICE_FAILED', sliced=False, uploaded=False, started=False,
                                slice_error=str(retry_error))
@@ -1110,7 +1295,9 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
         mj._timing(jp, 'intake_slice_returned')
         gcodes = [str(g) for g in (out if isinstance(out, list) else [out])]
         sliced = json.loads(jp.read_text())
-        receipt.update(status='SLICED', sliced=True, gcodes=gcodes)
+        # Deliveries are bound to these exact bytes; a file that changes afterwards is refused.
+        receipt.update(status='SLICED', sliced=True, gcodes=gcodes,
+                       gcode_sha256={g: delivery.sha256(g) for g in gcodes})
         receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
         provenance = sliced.get('provenance') or {}
         if not provenance and (sliced.get('derived_plates') or []):
@@ -1136,11 +1323,12 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
             parts = plan['parts']
             listing = '\n'.join(f"- Plate {p['plate']}: {p['label']}" for p in parts)
             notice = (f"These print as {len(parts)} separate plates because {plan['split_reason']}.\n{listing}\n{breakdown}\n"
-                      "Choose which plate prints first. When it finishes, a picker lists the rest.")
+                      + ("Choose which plate prints first. When it finishes, a picker lists the rest." if can_print
+                         else "Each plate is its own file."))
             receipt.update(split_plan=plan_id, split_reason=plan['split_reason'])
             receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
             await adapter.send(chat_id=source.chat_id, content=notice, metadata=metadata)
-            picked_plate = await _pick_plate(adapter, source, key, parts, timeout)
+            picked_plate = await _pick_plate(adapter, source, key, parts, timeout) if can_print else 0
             if picked_plate is None:
                 receipt['status'] = 'SLICED_NOT_STARTED'
                 receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
@@ -1177,11 +1365,17 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
                 question = breakdown + '\n' + question
             if slot_lines:
                 question = slot_lines + '\n' + question
-            go = await _ask(adapter, source, key, question, [print_next.START_LABEL, print_next.CANCEL_LABEL], timeout)
+            if delivery.only_printer(enabled):
+                go = await _ask(adapter, source, key, question, [print_next.START_LABEL, print_next.CANCEL_LABEL], timeout)
+            else:
+                if not can_print:
+                    question = breakdown + '\nSliced and validated. What should I do with the files?'
+                go = await _delivery_menu(adapter, source, key, metadata, timeout, question, enabled,
+                                          receipt, receipt_path, jp, gcodes)
             if go != 0:
                 receipt['status'] = 'SLICED_NOT_STARTED'
                 receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
-                tail = f' Plates stay ready: `/print-next {plan_id}`.' if split else ''
+                tail = f' Plates stay ready: `/print-next {plan_id}`.' if split and can_print else ''
                 await adapter.send(chat_id=source.chat_id, content='Sliced. Nothing uploaded or started.' + tail, metadata=metadata)
                 return {'action': 'skip', 'reason': 'operator did not start the sliced plate'}
         # One click recorded: bed clear, bound to the exact JOB.json and G-code. print-now still runs every gate
@@ -1195,11 +1389,10 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
         prep_msg = ' · '.join(['Preparing to start'] + ([f'Print #{print_no}'] if print_no else []) + [total])
         if slot_lines:
             prep_msg += '\n' + slot_lines
-        if not prep_sent:
-            await adapter.send(chat_id=source.chat_id, content=prep_msg, metadata=metadata)
         mj._timing(jp, 'intake_start_tapped')
         ok, tail = await _with_stop(adapter, source, key, metadata,
-                                    "Uploading to the printer. Press Stop to request cancellation.",
+                                    ((prep_msg + "\n") if not prep_sent else "")
+                                    + "Uploading to the printer. Press Stop to request cancellation.",
                                     print_next.start(target), allow_stop=True)
         mj._timing(jp, 'intake_start_returned', ok=bool(ok))
         receipt.update(status='STARTED' if ok else 'START_REFUSED', started=bool(ok))
@@ -1207,12 +1400,19 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
         warming = ok and print_next.still_preparing(tail)
         if ok:
             message = print_summary.format_started(exact_job, exact_plate) + later
-            if warming:
-                message += '\nWarming up; this message updates when printing begins.'
+            # No warming line and no later edit: the roast is always the last thing in this one post.
+            with contextlib.suppress(Exception):
+                roast = await asyncio.wait_for(asyncio.to_thread(
+                    _external.load('moonraker_event_listener').generate_roast,
+                    (exact_job or {}).get('title') or '', (exact_job or {}).get('summary') or ''), 8)
+                if roast:
+                    message += f'\n\n{roast}'
         else:
-            message = print_summary.scrub(tail)
+            message = print_summary.scrub(_refusal_text(tail))
+            if _restart_helps(tail):
+                message = await _offer_force_restart(adapter, source, key, message, timeout)
         sent = await adapter.send(chat_id=source.chat_id, content=message, metadata=metadata)
-        remote = print_next.started_file(tail) if warming else None
+        remote = None  # nothing edits this post later; warmup finishing stays silent
         message_id = getattr(sent, 'message_id', None)
         if remote and message_id:
             try:
@@ -1221,6 +1421,7 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
                 pass  # the listener then posts a short distinct follow-up instead of editing
         return {'action': 'skip', 'reason': 'sliced and start handled by button flow'}
     except (IntakeCancelled, Stopped) as exc:
+        logger.warning('intake stopped by operator: %s', type(exc).__name__)
         uncertain_start = isinstance(exc, Stopped) and exc.uncertain
         if jp is not None and not uncertain_start:
             with contextlib.suppress(Exception):
@@ -1238,6 +1439,7 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
         await adapter.send(chat_id=source.chat_id, content=message, metadata=metadata)
         return {'action': 'skip', 'reason': reason}
     except IntakeExpired:
+        logger.warning('intake question expired')
         # The receipt and JOB.json written before this question stay on disk. Resume
         # re-reads them instead of asking for the link again.
         receipt.update(status='EXPIRED', sliced=False, uploaded=False, started=False)
@@ -1271,6 +1473,7 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
                            metadata=metadata)
         return {'action': 'skip', 'reason': 'expired before a choice'}
     except Exception as exc:
+        logger.exception('intake failed')
         receipt.update(status='FAILED', error=str(exc))
         receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
         await adapter.send(chat_id=source.chat_id, content=f'New model preparation stopped: {exc}. Nothing sliced, uploaded or started.', metadata=metadata)
@@ -1279,3 +1482,4 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
         if jp is not None:
             drop_runner(jp)
         _LIVE_KEY.reset(live_token)
+        logs.unbind(log_token)

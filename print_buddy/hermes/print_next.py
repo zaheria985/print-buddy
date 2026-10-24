@@ -180,7 +180,18 @@ def still_preparing(detail: str) -> bool:
     print_stats reaches printing; it edits (or follows up on) the intake's one message.
     """
     text = str(detail or "")
-    return PREPARING_MARK in text or SUBMITTED_MARK in text
+    if PREPARING_MARK in text or SUBMITTED_MARK in text:
+        return True
+    # The AD5X mapped native route reports "MAPPED START READBACK {...}" with phase preparing.
+    for line in reversed(text.splitlines()):
+        if "MAPPED START READBACK" not in line or "{" not in line:
+            continue
+        try:
+            value = json.loads(line[line.find("{"):])
+        except ValueError:
+            return False
+        return isinstance(value, dict) and value.get("started") and value.get("outcome") != "printing"
+    return False
 
 
 def started_file(detail: str) -> str | None:

@@ -1,0 +1,5 @@
+# Acceptance-only: keeps the optional bundled Spoolman on the isolated network as well.
+services:
+  spoolman:
+    networks: [isolated]
+    restart: "no"

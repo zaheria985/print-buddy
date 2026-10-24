@@ -153,3 +153,49 @@ def test_bambu_output_still_fails_the_same_post_slice_gate(tmp_path, monkeypatch
         raise AssertionError('unsafe Bambu G-code bypassed the Orca post-slice gate')
     assert len(calls) == 2
 
+
+
+def test_absent_orca_slice_refuses_before_fallback_or_output(tmp_path, monkeypatch):
+    import pytest
+    missing = str(tmp_path / 'no-orca-executable')
+    monkeypatch.setattr(adapter, 'ORCA_COMMAND', [missing])
+    with patch('urllib.request.urlopen', side_effect=AssertionError('network fallback')):
+        with pytest.raises(FileNotFoundError, match='no-orca-executable'):
+            adapter.slice_model(_source(tmp_path), tmp_path / 'out', _state())
+    assert not list((tmp_path / 'out').glob('*.gcode'))
+
+
+def _box_triangles(x, y, z):
+    vertices = [(0,0,0),(x,0,0),(x,y,0),(0,y,0),
+                (0,0,z),(x,0,z),(x,y,z),(0,y,z)]
+    faces = [(0,1,2),(0,2,3),(4,6,5),(4,7,6),(0,4,5),(0,5,1),
+             (1,5,6),(1,6,2),(2,6,7),(2,7,3),(3,7,4),(3,4,0)]
+    return [[vertices[i] for i in face] for face in faces]
+
+
+def test_offline_placement_report_prefers_upright_when_it_fits():
+    rows = adapter.placement_candidates(_box_triangles(20, 10, 5), bed_mm=(100, 100), max_z_mm=100)
+    assert rows[0]['axis'] == 'identity'
+    assert rows[0]['fits_bed'] is True
+    assert rows[0]['footprint_mm'] == [20.0, 10.0, 5.0]
+    assert rows[0]['rank'] == 1
+
+
+def test_offline_placement_report_finds_diagonal_bar_without_orca(monkeypatch):
+    monkeypatch.setattr(adapter.subprocess, 'run', lambda *_a, **_k: (_ for _ in ()).throw(AssertionError('Orca invoked')))
+    rows = adapter.placement_candidates(_box_triangles(70, 10, 2), bed_mm=(60, 60), max_z_mm=100)
+    diagonal = next(row for row in rows if row['axis'] == 'identity' and row['rz_deg'] == 45.0)
+    assert diagonal['footprint_mm'] == [56.569, 56.569, 2.0]
+    assert diagonal['margin_x_mm'] == 3.431
+    assert diagonal['margin_y_mm'] == 3.431
+    assert diagonal['margin_z_mm'] == 98.0
+    assert diagonal['min_bed_margin_mm'] == 3.431
+    assert diagonal['diagonal_gain_mm'] == 13.431
+    assert diagonal['fits_bed'] is True
+    assert diagonal['rank'] == 1
+
+
+def test_offline_placement_report_marks_all_rotations_oversized():
+    rows = adapter.placement_candidates(_box_triangles(100, 100, 100), bed_mm=(60, 60), max_z_mm=80)
+    assert rows
+    assert all(row['fits_bed'] is False for row in rows)

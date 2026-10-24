@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -28,7 +29,7 @@ from pathlib import Path
 
 import websockets
 
-from .. import printers
+from .. import healthcheck, logs, printers
 from . import _config
 from . import moonraker_discord_announcements as announcer
 from . import discord_print_summary as print_summary
@@ -49,10 +50,22 @@ LOG = announcer.PROFILE_HOME / "logs" / "moonraker_event_listener.log"
 TERMINAL = {"cancelled": "Print cancelled", "error": "Print stopped with an error"}
 
 
+logger = logging.getLogger(__name__)
+_PROBLEM = re.compile(r"\b(failed|failure|error|lost|refused|could not|cannot|unreachable|timed out)\b", re.I)
+
+
 def log(line):
+    """Record one listener event: the legacy log file, and the shared logger (stderr, journald, docker logs).
+
+    A line that reports a failure is logged as a warning, and the traceback of the exception being handled
+    when it is called, if any, is kept. Credentials are redacted in both places.
+    """
+    line = logs.redact(str(line))
     LOG.parent.mkdir(parents=True, exist_ok=True)
     with LOG.open("a") as fh:
         fh.write(f"{datetime.now().astimezone().isoformat(timespec='seconds')} {line}\n")
+    logger.log(logging.WARNING if _PROBLEM.search(line) else logging.INFO, "%s", line,
+               exc_info=sys.exc_info() if sys.exc_info()[0] else None)
 
 
 def post(message):
@@ -200,12 +213,15 @@ def screen_cancel_reboot(filename, *, status_reader=None, rebooter=None, clearer
         return False, "skipped"
     label = print_summary.safe_label(filename) if filename else "the print"
     if st.get("klippy") == "shutdown":
-        say(f"Screen cancel on {label} during an emergency stop. Clearing it with one firmware restart (no motion or heat).")
+        # The cancel report was just posted; one result line after the restart is enough.
         ok, msg = (clearer or pab.clear_shutdown)()
     else:
         say(f"Screen cancel on {label}. Force restarting the printer now, about two minutes.")
         ok, msg = (rebooter or print_control.force_reboot)()
     log(f"screen cancel reboot ok={ok}: {msg}")
+    if ok and clearer is None and rebooter is None:  # real run only; tests inject fakes
+        with contextlib.suppress(Exception):
+            pab.retire_alerts(_bot_token(), filename, "Cleared after the screen cancel; nothing to do.")
     say(msg)
     return ok, msg
 
@@ -917,11 +933,24 @@ def announce_warmup_done(filename):
     text = print_summary.format_event("started", filename)
     text += "\nWarmup complete, now printing."
     message_id = None
+    roast = ""
     try:
         from . import print_next
         message_id = print_next.take_start_message(filename)
     except Exception as exc:
         log(f"start message lookup failed file={filename!r}: {exc!r}")
+    if not message_id:
+        # The intake already posted the one "Print started" message; a second line after it is noise.
+        log(f"no recorded start message; warmup done silently file={filename!r}")
+        return False
+    try:
+        job, _plate = print_summary.find_job(filename)
+        roast = generate_roast((job or {}).get("title") or Path(str(filename or "")).stem,
+                               (job or {}).get("summary") or "")
+    except Exception:
+        roast = ""
+    if roast:
+        text += f"\n\n{roast}"
     if message_id:
         try:
             from . import print_alert_buttons as pab
@@ -931,9 +960,8 @@ def announce_warmup_done(filename):
                 return True
         except Exception as exc:
             log(f"start message edit error id={message_id}: {exc!r}")
-        log(f"start message edit failed id={message_id}; posting short line")
-    title = print_summary.safe_label(((print_summary.find_job(filename)[0] or {}).get("title")) or filename, "print")
-    return post(f"Warmup done, now printing: {title}")
+        log(f"start message edit failed id={message_id}; leaving the start post as is")
+    return False
 
 
 SUBSCRIBE = json.dumps({
@@ -1556,6 +1584,7 @@ class Listener:
         self.ifs_monitor.stable_counts = {}
         self.ifs_monitor.transition_from = {}
         async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20, max_size=2**22) as ws:
+            self.moonraker_connected = True
             await ws.send(SUBSCRIBE)
             last_tick = time.monotonic()
             while True:
@@ -1589,7 +1618,11 @@ class Listener:
                     elif method in ("notify_klippy_disconnected", "notify_klippy_shutdown"):
                         log(f"{method} while state={self.state}")
                         if self.state in ("printing", "paused"):
-                            await asyncio.to_thread(post_shutdown_alert, self.filename)
+                            if getattr(self, "shutdown_alerted", None) != self.filename:
+                                self.shutdown_alerted = self.filename  # one firmware-stopped alert per job
+                                await asyncio.to_thread(post_shutdown_alert, self.filename)
+                            else:
+                                log("firmware stop already alerted for this job; not posting again")
                             self.state = "error"
                     elif method == "notify_klippy_ready":
                         log("klippy ready; resubscribing")
@@ -1608,15 +1641,34 @@ class Listener:
                     last_tick = time.monotonic()
                     await asyncio.to_thread(run_announcer, "tick")
 
-    async def forever(self):
-        delay = 5
+    async def heartbeat(self):
+        """Adapted from contributor Docker commit 3bb0984; no printer probe."""
         while True:
             try:
-                await self.session()
+                await asyncio.to_thread(healthcheck.beat,
+                                        moonraker_connected=self.moonraker_connected,
+                                        state=self.state)
             except Exception as exc:
-                log(f"connection lost: {exc!r}; retry in {delay}s")
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, 120)
+                log(f"heartbeat write failed: {exc!r}")
+            await asyncio.sleep(healthcheck.HEARTBEAT_S)
+
+    async def forever(self):
+        delay = 5
+        self.moonraker_connected = False
+        beating = asyncio.create_task(self.heartbeat())
+        try:
+            while True:
+                try:
+                    await self.session()
+                except Exception as exc:
+                    log(f"connection lost: {exc!r}; retry in {delay}s")
+                finally:
+                    self.moonraker_connected = False
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 120)
+        finally:
+            beating.cancel()
+            await asyncio.gather(beating, return_exceptions=True)
 
 
 def main():
@@ -1624,6 +1676,7 @@ def main():
         raise SystemExit("services.moonraker_url is not configured (or services.moonraker_ws_url). "
                          "Set it in config/local.yaml or config/local.toml; the listener has nothing to connect to.")
     route = "PRINT_VISION_URL" if os.environ.get("PRINT_VISION_URL") else (_VISION_BASE or "not configured")
+    logs.configure()
     log(f"listener starting; camera watchdog initialized route={route} model={_VISION_MODEL}")
     asyncio.run(Listener().forever())
 
