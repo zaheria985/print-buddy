@@ -167,7 +167,7 @@ class OverrideTests(unittest.TestCase):
         inventory = settings.load(home=settings.HOME, local=False, environ={})
         expected = {
             "printer": {"name", "firmware", "start_macro", "end_macro", "bed_mm",
-                        "max_print_height_mm", "nozzle_diameter_mm", "ifs_slots", "model"},
+                        "max_print_height_mm", "nozzle_diameter_mm", "ifs_slots", "model", "vendor", "slicer"},
             "layout": {"single_copy_edge_mm", "multi_copy_edge_mm", "merge_edge_margin_mm", "merge_spacing_mm", "max_merged_hours"},
             "prime_tower": {"size_mm", "part_clearance_mm", "edge_mm", "merge_slack_mm"},
             "cold_pull": {"pla_trial", "petg"},
@@ -189,6 +189,7 @@ class OverrideTests(unittest.TestCase):
             "timelapse": {"archive_host", "archive_dir", "ssh_key", "render_wait_s", "render_poll_s",
                           "max_bytes", "local_retention_days", "plan_clip_retention_days"},
             "maintenance": {"quick_hours", "full_hours", "full_days"},
+            "delivery": {"methods"},
             "nozzle_temp_offsets": {"brass", "hardened_steel", "stainless_steel", "ruby", "tungsten_carbide", "diamond"},
             "material_temps": {"PLA", "PETG", "ABS", "ASA", "TPU", "PA", "PC"},
         }
