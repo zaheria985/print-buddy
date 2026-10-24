@@ -1,0 +1,243 @@
+{
+  "flashforge.ad5x": {
+    "_model": {
+      "adapter": "print_buddy.printers.flashforge.adapter.ZmodAdapter",
+      "baseline": null,
+      "label": "Flashforge AD5X (ZMod)",
+      "supported_nozzle_sizes": [
+        0.25,
+        0.4,
+        0.6,
+        0.8
+      ],
+      "supported_nozzle_types": [
+        "stainless_steel",
+        "hardened_steel"
+      ],
+      "templates": "flashforge_ad5x"
+    },
+    "cold_pull": {
+      "petg": [
+        245,
+        100
+      ],
+      "pla_trial": [
+        220,
+        90
+      ]
+    },
+    "layout": {
+      "merge_edge_margin_mm": 8.0,
+      "merge_spacing_mm": 10.0,
+      "multi_copy_edge_mm": 3.0,
+      "single_copy_edge_mm": 1.0
+    },
+    "orca": {
+      "templates": "print_buddy/templates/orca/flashforge_ad5x"
+    },
+    "prime_tower": {
+      "edge_mm": 10.0,
+      "merge_slack_mm": 5.0,
+      "part_clearance_mm": 8.0,
+      "size_mm": 45.0
+    },
+    "printer": {
+      "bed_mm": [
+        220.0,
+        220.0
+      ],
+      "end_macro": "END_PRINT",
+      "firmware": "ZMod Klipper",
+      "ifs_slots": 4,
+      "max_print_height_mm": 220.0,
+      "model": "flashforge.ad5x",
+      "name": "Flashforge AD5X",
+      "nozzle_diameter_mm": 0.4,
+      "start_macro": "START_PRINT"
+    }
+  },
+  "klipper.generic": {
+    "_model": {
+      "adapter": "print_buddy.printers.klipper.adapter.KlipperAdapter",
+      "baseline": "protected-settings-baseline.klipper.generic.json",
+      "label": "Generic Klipper",
+      "supported_nozzle_sizes": [
+        0.2,
+        0.25,
+        0.4,
+        0.6,
+        0.8
+      ],
+      "supported_nozzle_types": [
+        "brass",
+        "hardened_steel",
+        "stainless_steel",
+        "ruby",
+        "tungsten_carbide",
+        "diamond"
+      ],
+      "templates": "klipper_generic"
+    },
+    "cold_pull": {
+      "petg": [
+        245,
+        100
+      ],
+      "pla_trial": [
+        220,
+        90
+      ]
+    },
+    "layout": {
+      "merge_edge_margin_mm": 8.0,
+      "merge_spacing_mm": 10.0,
+      "multi_copy_edge_mm": 3.0,
+      "single_copy_edge_mm": 1.0
+    },
+    "orca": {
+      "templates": "print_buddy/templates/orca/klipper_generic"
+    },
+    "prime_tower": {
+      "edge_mm": 10.0,
+      "merge_slack_mm": 5.0,
+      "part_clearance_mm": 8.0,
+      "size_mm": 45.0
+    },
+    "printer": {
+      "bed_mm": [
+        220.0,
+        220.0
+      ],
+      "end_macro": "PRINT_END",
+      "firmware": "Klipper",
+      "ifs_slots": 1,
+      "max_print_height_mm": 220.0,
+      "model": "klipper.generic",
+      "name": "Generic Klipper",
+      "nozzle_diameter_mm": 0.4,
+      "start_macro": "PRINT_START"
+    }
+  },
+  "octoprint.marlin": {
+    "_model": {
+      "adapter": "print_buddy.printers.octoprint.adapter.OctoPrintAdapter",
+      "baseline": null,
+      "label": "Marlin via OctoPrint",
+      "supported_nozzle_sizes": [
+        0.2,
+        0.25,
+        0.4,
+        0.6,
+        0.8
+      ],
+      "supported_nozzle_types": [
+        "brass",
+        "hardened_steel",
+        "stainless_steel",
+        "ruby",
+        "tungsten_carbide",
+        "diamond"
+      ],
+      "templates": "octoprint_marlin"
+    },
+    "cold_pull": {
+      "petg": [
+        245,
+        100
+      ],
+      "pla_trial": [
+        220,
+        90
+      ]
+    },
+    "layout": {
+      "merge_edge_margin_mm": 8.0,
+      "merge_spacing_mm": 10.0,
+      "multi_copy_edge_mm": 3.0,
+      "single_copy_edge_mm": 1.0
+    },
+    "orca": {
+      "templates": "print_buddy/templates/orca/octoprint_marlin"
+    },
+    "prime_tower": {
+      "edge_mm": 10.0,
+      "merge_slack_mm": 5.0,
+      "part_clearance_mm": 8.0,
+      "size_mm": 45.0
+    },
+    "printer": {
+      "bed_mm": [
+        220.0,
+        220.0
+      ],
+      "end_macro": "PRINT_END",
+      "firmware": "Marlin",
+      "ifs_slots": 1,
+      "max_print_height_mm": 220.0,
+      "model": "octoprint.marlin",
+      "name": "Marlin via OctoPrint",
+      "nozzle_diameter_mm": 0.4,
+      "start_macro": "PRINT_START"
+    }
+  },
+  "sovol.sv06": {
+    "_model": {
+      "adapter": "print_buddy.printers.klipper.adapter.KlipperAdapter",
+      "baseline": "protected-settings-baseline.sovol.sv06.json",
+      "label": "Sovol SV06 (Klipper)",
+      "supported_nozzle_sizes": [
+        0.2,
+        0.4,
+        0.6,
+        0.8
+      ],
+      "supported_nozzle_types": [
+        "brass",
+        "hardened_steel",
+        "ruby",
+        "tungsten_carbide",
+        "diamond"
+      ],
+      "templates": "sovol_sv06"
+    },
+    "cold_pull": {
+      "petg": [
+        245,
+        100
+      ],
+      "pla_trial": [
+        220,
+        90
+      ]
+    },
+    "layout": {
+      "merge_edge_margin_mm": 8.0,
+      "merge_spacing_mm": 10.0,
+      "multi_copy_edge_mm": 3.0,
+      "single_copy_edge_mm": 1.0
+    },
+    "orca": {
+      "templates": "print_buddy/templates/orca/sovol_sv06"
+    },
+    "prime_tower": {
+      "edge_mm": 10.0,
+      "merge_slack_mm": 5.0,
+      "part_clearance_mm": 8.0,
+      "size_mm": 45.0
+    },
+    "printer": {
+      "bed_mm": [
+        220.0,
+        220.0
+      ],
+      "end_macro": "PRINT_END",
+      "firmware": "Klipper",
+      "ifs_slots": 1,
+      "max_print_height_mm": 220.0,
+      "model": "sovol.sv06",
+      "name": "Sovol SV06",
+      "nozzle_diameter_mm": 0.4,
+      "start_macro": "PRINT_START"
+    }
+  }
+}

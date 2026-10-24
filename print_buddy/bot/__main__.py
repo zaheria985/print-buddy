@@ -7,7 +7,7 @@ health  exit 0 only while a running bot reports a fresh heartbeat with no Hermes
 import logging
 import sys
 
-from .. import settings
+from .. import logs, settings
 
 
 def checks(cfg):
@@ -73,7 +73,7 @@ def check(out=None):
 
 
 def run():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logs.configure()
     if check(sys.stderr):
         print("Not starting: fix the FAIL lines above.", file=sys.stderr)
         return 2

@@ -74,7 +74,7 @@ def test_changed_binding_discards_old_slice_before_starting_new_one(tmp_path):
         await runner.discard()
         assert not runner.running()
         assert not (folder / 'sliced').exists()
-        assert finished  # cancellation waits for the writer, then deletes its output
+        assert finished == []  # cancellation stops the old writer before it writes; nothing is left
 
     asyncio.run(run())
 

@@ -14,6 +14,9 @@ ALLOWED = {
     ('model_job', 'printables_download'), ('source_colors', 'inventory'),
     ('orca_adapter', 'orca_plate_capacity'), ('orca_adapter', 'fit_options'),
     ('model_job', 'per_part_fit_options'), ('plate_merge', 'full_size_split_possible'),
+    ('geometry_layout', 'inspect_geometry'), ('geometry_layout', 'arrange_and_export'),
+    ('geometry_layout', 'probe_single_plate_rearrange'),
+    ('cad_split', 'check_source_against_split_plan'), ('cad_split', 'prepare_cad_split'),
 }
 
 

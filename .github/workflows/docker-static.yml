@@ -1,0 +1,46 @@
+name: Docker static checks
+
+# No container is built, pulled or run: Compose files are only rendered. Image builds and runtime
+# acceptance live in docker-image-validation.yml, which runs only when a maintainer dispatches it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-24.04  # pinned: ubuntu-latest moves to 26 on 2026-10-19
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Shell syntax and ShellCheck
+        run: |
+          bash -n docker/entrypoint.sh tests/docker/image_acceptance.sh
+          sh -n docker/orca-build-jobs.sh
+          shellcheck -x docker/entrypoint.sh docker/orca-build-jobs.sh tests/docker/image_acceptance.sh
+      - name: Render every Compose variant (no containers)
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          sed -i 's#^PRINT_BUDDY_IMAGE=.*#PRINT_BUDDY_IMAGE=print-buddy:static-check#' .env
+          export ACCEPTANCE_FIXTURES="$PWD/tests/docker" PRINT_BUDDY_IMAGE=print-buddy:static-check
+          for files in \
+              "docker-compose.yml" \
+              "docker-compose.yml docker-compose.spoolman.yml" \
+              "docker-compose.yml tests/docker/compose.acceptance.yml" \
+              "docker-compose.yml docker-compose.spoolman.yml tests/docker/compose.acceptance-spoolman.yml tests/docker/compose.acceptance.yml"; do
+            args=(); for f in $files; do args+=(-f "$f"); done
+            echo "docker compose ${args[*]} config"
+            docker compose "${args[@]}" config --quiet
+          done
+          # Without an image the base file must refuse to render.
+          sed -i 's#^PRINT_BUDDY_IMAGE=.*#PRINT_BUDDY_IMAGE=#' .env
+          unset PRINT_BUDDY_IMAGE
+          if docker compose config --quiet 2>/dev/null; then echo "rendered without PRINT_BUDDY_IMAGE"; exit 1; fi
+      - name: Unraid templates parse
+        run: |
+          for f in docker/unraid/*.xml; do python3 -c "import sys, xml.etree.ElementTree as ET; ET.parse(sys.argv[1])" "$f"; done

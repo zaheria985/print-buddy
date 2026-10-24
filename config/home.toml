@@ -138,6 +138,14 @@ local_retention_days = 1
 # Clips held for a multi-plate plan that never finishes (abandoned) are dropped after this many days.
 plan_clip_retention_days = 14
 
+[logging]
+# Verbosity: DEBUG, INFO, WARNING or ERROR. DEBUG adds diagnostic detail; INFO is the normal level.
+level = "INFO"
+# text: one readable line per event. json: one JSON object per line, for log shippers.
+format = "text"
+# Also write a rotating log file here (5 MiB, 3 backups). Empty logs to stderr only (journald or docker logs).
+file = ""
+
 [maintenance]
 quick_hours = 25
 full_hours = 75

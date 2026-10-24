@@ -90,6 +90,10 @@ timelapse:
   max_bytes: 209715200
   local_retention_days: 1
   plan_clip_retention_days: 14
+logging:
+  level: INFO
+  format: text
+  file: ''
 maintenance:
   quick_hours: 25
   full_hours: 75

@@ -1,0 +1,226 @@
+"""Logging configuration, redaction, stage timing and representative failure paths (#150). Offline."""
+import io
+import json
+import logging
+import logging.handlers
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+import pytest
+
+from print_buddy import logs, settings
+from print_buddy.core import orca_adapter
+from print_buddy.hermes import moonraker_event_listener as listener
+
+# Built from parts so no token shaped string sits in the source (GitHub push protection flags those).
+DISCORD_TOKEN = ".".join(["MTIzNDU2Nzg5MDEyMzQ1Njc4OQ", "GabcDE", "abcdefghijklmnopqrstuvwxyz0123456789"])
+
+
+@pytest.fixture(autouse=True)
+def clean_root():
+    root = logging.getLogger()
+    before, level = list(root.handlers), root.level
+    yield
+    for handler in list(root.handlers):
+        if handler not in before:
+            root.removeHandler(handler)
+            handler.close()
+    root.setLevel(level)
+
+
+def lines(stream):
+    return [line for line in stream.getvalue().splitlines() if line]
+
+
+def test_text_format_has_timestamp_severity_component_and_bound_context():
+    stream = io.StringIO()
+    logs.configure({"level": "INFO", "format": "text"}, stream=stream)
+    token = logs.bind(intake="abc123")
+    try:
+        logging.getLogger("print_buddy.core.demo").warning("slice failed")
+    finally:
+        logs.unbind(token)
+    (line,) = lines(stream)
+    stamp, level, component, rest = line.split(" ", 3)
+    assert stamp[:4].isdigit() and ("+" in stamp or "-" in stamp[10:])  # ISO time with an offset
+    assert (level, component) == ("WARNING", "print_buddy.core.demo:")
+    assert rest == "slice failed intake=abc123"
+
+
+def test_json_format_is_one_object_per_line_with_traceback():
+    stream = io.StringIO()
+    logs.configure({"level": "INFO", "format": "json"}, stream=stream)
+    try:
+        raise ValueError("bad plate")
+    except ValueError:
+        logging.getLogger("print_buddy.demo").exception("fit failed")
+    record = json.loads(stream.getvalue())
+    assert record["level"] == "ERROR" and record["logger"] == "print_buddy.demo"
+    assert record["message"] == "fit failed"
+    assert "Traceback" in record["exception"] and "ValueError: bad plate" in record["exception"]
+
+
+def test_level_controls_verbosity_and_debug_shows_detail():
+    stream = io.StringIO()
+    logs.configure({"level": "INFO"}, stream=stream)
+    logging.getLogger("print_buddy.demo").debug("detail")
+    assert lines(stream) == []
+    logs.configure({"level": "DEBUG"}, stream=stream)
+    logging.getLogger("print_buddy.demo").debug("detail")
+    assert "DEBUG print_buddy.demo: detail" in stream.getvalue()
+
+
+def test_configure_twice_does_not_duplicate_lines():
+    stream = io.StringIO()
+    logs.configure({}, stream=stream)
+    logs.configure({}, stream=stream)
+    logging.getLogger("print_buddy.demo").info("once")
+    assert len(lines(stream)) == 1
+
+
+def test_invalid_level_and_format_fall_back_to_defaults():
+    stream = io.StringIO()
+    logs.configure({"level": "LOUD", "format": "xml"}, stream=stream)
+    assert logging.getLogger().level == logging.INFO
+    logging.getLogger("print_buddy.demo").info("hello")
+    assert "INFO print_buddy.demo: hello" in stream.getvalue()
+
+
+def test_file_option_writes_a_rotating_log_file(tmp_path):
+    target = tmp_path / "logs" / "print-buddy.log"
+    logs.configure({"level": "INFO", "file": str(target)}, stream=io.StringIO())
+    logging.getLogger("print_buddy.demo").info("to disk")
+    assert "to disk" in target.read_text()
+    assert any(isinstance(h, logging.handlers.RotatingFileHandler) for h in logging.getLogger().handlers)
+
+
+def test_unwritable_file_falls_back_to_stderr_only(tmp_path, capsys):
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    logs.configure({"file": str(blocker / "sub" / "x.log")}, stream=io.StringIO())
+    assert "logging to stderr only" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("secret_line", [
+    f"login with {DISCORD_TOKEN}",
+    "Authorization: Bearer abcdefghijklmnop12345",
+    "request failed token=abcd1234efgh5678",
+    'payload {"api_key": "sk-live-123456789"}',
+    "GET https://user:hunter2@printer.local/api failed",
+    "DISCORD_BOT_TOKEN=abcdef123456",
+])
+def test_redact_hides_credentials(secret_line):
+    cleaned = logs.redact(secret_line)
+    for fragment in (DISCORD_TOKEN, "abcdefghijklmnop12345", "abcd1234efgh5678", "sk-live-123456789",
+                     "hunter2", "abcdef123456"):
+        assert fragment not in cleaned
+    assert logs.REDACTED in cleaned
+
+
+def test_redact_hides_secret_environment_values_and_leaves_normal_text(monkeypatch):
+    monkeypatch.setenv("LLM_API_KEY", "plain-looking-secret-value")
+    assert "plain-looking-secret-value" not in logs.redact("calling with plain-looking-secret-value now")
+    assert logs.redact("Slicing finished in 12.0s for part.stl") == "Slicing finished in 12.0s for part.stl"
+
+
+def test_handlers_redact_message_arguments_and_tracebacks():
+    stream = io.StringIO()
+    logs.configure({"format": "text"}, stream=stream)
+    try:
+        raise RuntimeError(f"rejected {DISCORD_TOKEN}")
+    except RuntimeError:
+        logging.getLogger("print_buddy.demo").exception("failed with %s", "password=hunter2xyz")
+    output = stream.getvalue()
+    assert DISCORD_TOKEN not in output and "hunter2xyz" not in output
+    assert "Traceback" in output
+
+
+def test_stage_logs_start_and_elapsed_time():
+    stream = io.StringIO()
+    logs.configure({"level": "INFO"}, stream=stream)
+    with logs.stage(logging.getLogger("print_buddy.demo"), "fit check", plate=2):
+        pass
+    started, done = lines(stream)
+    assert "fit check started plate=2" in started
+    assert "fit check done in " in done and done.rstrip().endswith("plate=2")
+
+
+def test_stage_failure_keeps_traceback_and_reraises():
+    stream = io.StringIO()
+    logs.configure({"level": "INFO"}, stream=stream)
+    with pytest.raises(ValueError, match="no geometry"):
+        with logs.stage(logging.getLogger("print_buddy.demo"), "inspect"):
+            raise ValueError("no geometry")
+    output = stream.getvalue()
+    assert "ERROR print_buddy.demo: inspect failed after" in output
+    assert "ValueError: no geometry" in output and "Traceback" in output
+
+
+def test_stage_interruption_is_a_warning_without_a_traceback():
+    stream = io.StringIO()
+    logs.configure({"level": "INFO"}, stream=stream)
+    with pytest.raises(KeyboardInterrupt):
+        with logs.stage(logging.getLogger("print_buddy.demo"), "slice"):
+            raise KeyboardInterrupt
+    output = stream.getvalue()
+    assert "WARNING print_buddy.demo: slice interrupted after" in output and "Traceback" not in output
+
+
+# --- settings -------------------------------------------------------------------------------------------
+
+def test_logging_defaults_come_from_the_checked_in_config():
+    for home in (settings.load(local=False, environ={}), settings.load(home=settings.LEGACY_HOME, local=False, environ={})):
+        assert home["logging"] == {"level": "INFO", "format": "text", "file": ""}
+
+
+def test_env_override_sets_debug_json_logging():
+    cfg = settings.load(local=False, environ={"PRINT_BUDDY__LOGGING__LEVEL": "debug", "PRINT_BUDDY__LOGGING__FORMAT": "JSON"})
+    assert cfg["logging"]["level"] == "DEBUG" and cfg["logging"]["format"] == "json"
+
+
+@pytest.mark.parametrize("env, message", [
+    ({"PRINT_BUDDY__LOGGING__LEVEL": "loud"}, "[logging] level must be one of"),
+    ({"PRINT_BUDDY__LOGGING__FORMAT": "xml"}, "[logging] format must be one of"),
+])
+def test_invalid_logging_settings_are_rejected(env, message):
+    with pytest.raises(settings.SettingsError, match=message.replace("[", r"\[")):
+        settings.load(local=False, environ=env)
+
+
+# --- representative failure paths -----------------------------------------------------------------------
+
+def test_slicer_nonzero_exit_logs_rc_and_elapsed_time(caplog):
+    done = SimpleNamespace(returncode=3, stdout="", stderr="bad\nworse")
+    with caplog.at_level(logging.DEBUG, logger=orca_adapter.logger.name), \
+            mock.patch.object(orca_adapter.subprocess, "run", return_value=done):
+        assert orca_adapter._run_slicer(["orca", "--secret-arg"], "OrcaSlicer", Path("/tmp/job")) is done
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("OrcaSlicer run finished rc=3 in " in m for m in messages)
+    assert [r.levelno for r in caplog.records if "finished" in r.getMessage()] == [logging.WARNING]
+    assert not any("--secret-arg" in m for m in messages)  # the command line is never logged
+
+
+def test_slicer_that_cannot_start_logs_a_traceback_and_raises(caplog):
+    with caplog.at_level(logging.INFO, logger=orca_adapter.logger.name), \
+            mock.patch.object(orca_adapter.subprocess, "run", side_effect=FileNotFoundError("orca")):
+        with pytest.raises(FileNotFoundError):
+            orca_adapter._run_slicer(["orca"], "OrcaSlicer", Path("/tmp/job"))
+    failure = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert failure and failure[0].exc_info and "did not complete" in failure[0].getMessage()
+
+
+def test_listener_log_writes_the_legacy_file_and_the_shared_logger(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(listener, "LOG", tmp_path / "logs" / "listener.log")
+    with caplog.at_level(logging.INFO, logger=listener.logger.name):
+        listener.log("post ok target=discord:1")
+        try:
+            raise OSError("socket closed")
+        except OSError:
+            listener.log(f"connection lost: token=abc12345secret; retry in 5s")
+    written = (tmp_path / "logs" / "listener.log").read_text()
+    assert "post ok target=discord:1" in written and "abc12345secret" not in written
+    ok, lost = caplog.records
+    assert (ok.levelno, lost.levelno) == (logging.INFO, logging.WARNING)
+    assert lost.exc_info and "abc12345secret" not in lost.getMessage()

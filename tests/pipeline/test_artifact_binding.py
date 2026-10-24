@@ -37,7 +37,8 @@ async def test_persisted_derived_binding_hash_keys_roundtrip_and_tamper_refusal(
     job['derived_plates'] = [{'slot': 4, 'gcode': str(gcode)}]
     job['artifact_binding'] = {'source_sha256': mj.file_sha256(job['downloaded_file']),
         'decisions_sha256': mj.decisions_digest(job['color_decisions']),
-        'gcode_sha256': {'4': mj.file_sha256(gcode)}}
+        'gcode_sha256': {'4': mj.file_sha256(gcode)},
+        'recipe_version': job['slice_recipe']['version'], 'recipe_sha256': job['slice_recipe']['sha256']}
     job['gcode'] = str(gcode)
     job['gcode_verified'] = True
     jp.write_text(json.dumps(job))

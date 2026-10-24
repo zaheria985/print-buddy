@@ -1,0 +1,43 @@
+# Acceptance-only overlay for tests/docker/image_acceptance.sh. Never used for a deployment.
+# Every service sits on an internal network with no route out, uses dummy secrets from the
+# harness's .env, and never restarts, so a failure surfaces instead of looping. The fake
+# Moonraker is the only "printer" and has a readiness check, so `up --wait` waits for it.
+networks:
+  isolated:
+    internal: true
+
+services:
+  bot:
+    networks: [isolated]
+    restart: "no"
+    environment:
+      PRINT_BUDDY__SERVICES__MOONRAKER_URL: http://fake-moonraker:7125
+  listener:
+    networks: [isolated]
+    restart: "no"
+    environment:
+      PRINT_BUDDY__SERVICES__MOONRAKER_URL: http://fake-moonraker:7125
+    depends_on:
+      fake-moonraker:
+        condition: service_healthy
+    healthcheck:
+      interval: 5s
+      start_period: 10s
+      retries: 3
+
+  fake-moonraker:
+    # Served by the image under test's own Python and websockets: no extra image is pulled.
+    image: ${PRINT_BUDDY_IMAGE:?Set PRINT_BUDDY_IMAGE}
+    entrypoint: [python3, /fixture/fake_moonraker.py, "7125"]
+    volumes:
+      - ${ACCEPTANCE_FIXTURES:?Set ACCEPTANCE_FIXTURES}:/fixture:ro
+    networks: [isolated]
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7125/server/info', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

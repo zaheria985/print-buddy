@@ -1,12 +1,15 @@
 """Settings load from YAML, with TOML compatibility during migration.
 
 Load order, later wins key by key:
-  1. The printer model's defaults (print_buddy/printers/<brand>/<model>.py)
+  1. The printer's defaults: its vendor profile (print_buddy/printers/<vendor>/__init__.py) under the
+     printer model's own (print_buddy/printers/<vendor>/<printer>.py)
   2. config/home.yaml, falling back to config/home.toml
   3. $PRINT_BUDDY_CONFIG, else config/local.yaml, falling back to config/local.toml
   4. Environment: PRINT_BUDDY__SECTION__KEY, or a legacy name from LEGACY_ENV
 
-The model comes from environment, selected local configuration, then home configuration.
+The model comes from environment, selected local configuration, then home configuration. [printer] model
+is the full "vendor.printer" key, as every existing config has it, or the printer part with [printer]
+vendor (printers.resolve_key); either way it is stored as the full key.
 Unknown local keys and values with mismatched types fail loudly.
 """
 from __future__ import annotations
@@ -195,7 +198,34 @@ def _positive(data, section, key, kind=float):
     return kind(value)
 
 
+def _model_key(model, vendor=None):
+    try:
+        return printers.resolve_key(model, vendor)
+    except ValueError as exc:
+        raise SettingsError(str(exc)) from None
+
+
+def _validate_vendor_choices(data, model):
+    """[printer] slicer and [delivery] methods must be ones the printer's vendor profile offers."""
+    vendor = model.vendor
+    slicer = data["printer"].setdefault("slicer", vendor.slicers[0])
+    if slicer not in vendor.slicers:
+        raise SettingsError(f"[printer] slicer {slicer!r} is not available for vendor {vendor.key!r} "
+                            f"(available: {', '.join(vendor.slicers)})")
+    methods = data.setdefault("delivery", {}).setdefault("methods", list(vendor.default_delivery))
+    if not isinstance(methods, list) or not methods or not all(isinstance(m, str) for m in methods):
+        raise SettingsError(f"[delivery] methods must be a non-empty list, like {list(vendor.default_delivery)!r}")
+    unknown = [m for m in methods if m not in vendor.delivery]
+    if unknown:
+        raise SettingsError(f"[delivery] methods {unknown} are not offered for vendor {vendor.key!r} "
+                            f"(available: {', '.join(vendor.delivery)})")
+    # Vendor order, no repeats: the post-slice buttons follow it.
+    data["delivery"]["methods"] = [m for m in vendor.delivery if m in methods]
+
+
 BOT_MODES = ("hermes", "standalone")
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+LOG_FORMATS = ("text", "json")
 
 
 def user_ids(value):
@@ -205,6 +235,22 @@ def user_ids(value):
         if not part.isdigit():
             raise SettingsError(f"[discord] allowed_user_ids must be numeric Discord user IDs, got {part!r}")
     return ids
+
+
+def _validate_logging(data):
+    """The [logging] section (#150). Absent in a hand-made home file means the defaults."""
+    logging_cfg = data.setdefault("logging", {})
+    level = str(logging_cfg.setdefault("level", "INFO")).upper()
+    if level not in LOG_LEVELS:
+        raise SettingsError(f"[logging] level must be one of {', '.join(LOG_LEVELS)}, got {logging_cfg['level']!r}")
+    logging_cfg["level"] = level
+    kind = str(logging_cfg.setdefault("format", "text")).lower()
+    if kind not in LOG_FORMATS:
+        raise SettingsError(f"[logging] format must be one of {', '.join(LOG_FORMATS)}, got {logging_cfg['format']!r}")
+    logging_cfg["format"] = kind
+    path = logging_cfg.setdefault("file", "")
+    if not isinstance(path, str):
+        raise SettingsError(f"[logging] file must be a path or empty, got {path!r}")
 
 
 def _validate_bot(data):
@@ -259,10 +305,9 @@ def validate(data):
         if isinstance(raw_offset, bool) or not isinstance(raw_offset, (int, float)) or not -10 <= raw_offset <= 15:
             raise SettingsError(f"[nozzle_temp_offsets] {name} must be between -10 and +15 °C, got {raw_offset!r}")
         data["nozzle_temp_offsets"][name] = float(raw_offset)
-    key = data["printer"].get("model")
-    if key not in printers.MODELS:
-        raise SettingsError(f"[printer] model must be one of {', '.join(printers.MODELS)}, got {key!r}")
+    key = _model_key(data["printer"].get("model"), data["printer"].get("vendor"))
     model = printers.MODELS[key]
+    data["printer"]["model"], data["printer"]["vendor"] = key, model.vendor.key
     nozzle_size = data["printer"]["nozzle_diameter_mm"]
     if nozzle_size not in model.supported_nozzle_sizes:
         supported = ", ".join(f"{s:g}" for s in sorted(model.supported_nozzle_sizes))
@@ -280,6 +325,7 @@ def validate(data):
         data["printer"]["nozzle_type"] = norm_type
     if not model.adapter.multi_slot and data["printer"]["ifs_slots"] != 1:
         raise SettingsError(f"[printer] ifs_slots must be 1 for model {key!r} (single extruder)")
+    _validate_vendor_choices(data, model)
     for key, default in (("start_macro", "PRINT_START"), ("end_macro", "PRINT_END")):
         macro = data["printer"].setdefault(key, default)
         if not isinstance(macro, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", macro):
@@ -318,6 +364,7 @@ def validate(data):
     for key in ("question_timeout_s", "safety_confirm_timeout_s", "upload_wait_s", "cold_pull_outcome_s"):
         data["discord"][key] = _positive(data, "discord", key, int)
     _validate_bot(data)
+    _validate_logging(data)
     templates = data.get("orca", {}).get("templates")
     if not isinstance(templates, str) or not templates:
         raise SettingsError("[orca] templates must be a folder path")
@@ -349,10 +396,10 @@ def load(home=None, local=None, environ=None):
         elif LEGACY_LOCAL.is_file():
             local = LEGACY_LOCAL
     extra = _read(local) if local else {}
-    key = (environ.get("PRINT_BUDDY__PRINTER__MODEL") or extra.get("printer", {}).get("model")
-           or home_data.get("printer", {}).get("model"))
-    if key not in printers.MODELS:
-        raise SettingsError(f"[printer] model must be one of {', '.join(printers.MODELS)}, got {key!r}")
+    def pick(name):
+        return (environ.get(f"PRINT_BUDDY__PRINTER__{name.upper()}") or extra.get("printer", {}).get(name)
+                or home_data.get("printer", {}).get(name))
+    key = _model_key(pick("model"), pick("vendor"))
     data = _merge(printers.MODELS[key].defaults(), home_data)
     base = copy.deepcopy(data)
     if local:

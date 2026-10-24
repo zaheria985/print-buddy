@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<!-- Unraid DockerMan template PROPOSAL for the bot service (issue #117). Not published or exercised on Unraid.
+     Replace Repository with a locally built, tested image tag or immutable digest: no published image exists.
+     Mirrors docker-compose.yml; tests/test_docker_release.py keeps the two in step. Setup: docs/DOCKER.md. -->
+<Container version="2">
+  <Name>print-buddy-bot</Name>
+  <Repository>REPLACE_WITH_TESTED_IMAGE</Repository>
+  <Registry/>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/catduckgnaf/print-buddy/issues</Support>
+  <Project>https://github.com/catduckgnaf/print-buddy</Project>
+  <Overview>The standalone Discord bot. Install together with Print Buddy Listener, from the same image and the same appdata paths. Printers and Spoolman are external services; no port is published.</Overview>
+  <Category>Tools:</Category>
+  <WebUI/>
+  <TemplateURL/>
+  <Icon/>
+  <ExtraParams>--cap-drop ALL --security-opt no-new-privileges:true --pids-limit 256 --memory 2g --cpus 2 --shm-size 256m --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 --restart unless-stopped --health-cmd &quot;python3 -m print_buddy.bot health&quot; --health-interval 30s --health-timeout 10s --health-start-period 60s --health-retries 3</ExtraParams>
+  <PostArgs>python3 -m print_buddy.bot</PostArgs>
+  <CPUset/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>The same image and appdata paths for Print Buddy Bot and Print Buddy Listener. Paths owned by UID/GID 1000.</Requires>
+  <Config Name="State" Target="/data/hermes" Default="/mnt/user/appdata/print-buddy/hermes" Mode="rw" Description="Runtime state, prompts, hardware and job records. Back this up." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/print-buddy/hermes</Config>
+  <Config Name="Archive" Target="/data/archive" Default="/mnt/user/appdata/print-buddy/archive" Mode="rw" Description="Sliced jobs and G-code. Back this up." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/print-buddy/archive</Config>
+  <Config Name="Records" Target="/data/records" Default="/mnt/user/appdata/print-buddy/records" Mode="rw" Description="Print records. Back this up." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/print-buddy/records</Config>
+  <Config Name="Cache" Target="/data/cache" Default="/mnt/user/appdata/print-buddy/cache" Mode="rw" Description="Regenerable cache." Type="Path" Display="advanced" Required="true" Mask="false">/mnt/user/appdata/print-buddy/cache</Config>
+  <Config Name="Settings file" Target="PRINT_BUDDY_CONFIG" Default="/app/config/docker.yaml" Mode="" Description="Leave as is, or point at a mounted YAML file for list settings." Type="Variable" Display="advanced" Required="true" Mask="false">/app/config/docker.yaml</Config>
+  <Config Name="Bot mode" Target="PRINT_BUDDY__BOT__MODE" Default="standalone" Mode="" Description="Must be standalone in Docker." Type="Variable" Display="advanced" Required="true" Mask="false">standalone</Config>
+  <Config Name="Discord bot token" Target="DISCORD_BOT_TOKEN" Default="" Mode="" Description="Secret. The same value in both entries." Type="Variable" Display="always" Required="true" Mask="true"></Config>
+  <Config Name="Discord channel ID" Target="PRINT_BUDDY__DISCORD__CHAT_ID" Default="" Mode="" Description="Channel Print Buddy uses." Type="Variable" Display="always" Required="true" Mask="false"></Config>
+  <Config Name="Allowed user IDs" Target="PRINT_BUDDY__DISCORD__ALLOWED_USER_IDS" Default="" Mode="" Description="Discord user IDs allowed to use the bot, comma or space separated." Type="Variable" Display="always" Required="true" Mask="false"></Config>
+  <Config Name="Printer model" Target="PRINT_BUDDY__PRINTER__MODEL" Default="flashforge.ad5x|sovol.sv06|klipper.generic|octoprint.marlin" Mode="" Description="flashforge.ad5x, sovol.sv06, klipper.generic or octoprint.marlin." Type="Variable" Display="always" Required="false" Mask="false">flashforge.ad5x</Config>
+  <Config Name="Moonraker URL" Target="PRINT_BUDDY__SERVICES__MOONRAKER_URL" Default="" Mode="" Description="Klipper printers, for example http://printer.example:7125. Fluidd is not needed here." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="OctoPrint URL" Target="PRINT_BUDDY__SERVICES__OCTOPRINT_URL" Default="" Mode="" Description="octoprint.marlin printers only." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="OctoPrint API key" Target="OCTOPRINT_API_KEY" Default="" Mode="" Description="Secret, octoprint.marlin printers only." Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="Spoolman URL" Target="PRINT_BUDDY__SERVICES__SPOOLMAN_URL" Default="" Mode="" Description="An existing Spoolman, for example http://spoolman.example:8000. Empty: none." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+</Container>

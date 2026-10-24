@@ -1,0 +1,44 @@
+name: Contribution checks
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  contribution-policy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Read current PR metadata and all changed files
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const number = context.payload.pull_request.number;
+            const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number: number});
+            if (pr.changed_files > 3000) {
+              core.setFailed('More than 3000 changed files: split the PR for a complete policy review.');
+              return;
+            }
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              ...context.repo, pull_number: number, per_page: 100
+            });
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'contribution.json'), JSON.stringify({
+              body: pr.body || '', files: files.map(file => file.filename)
+            }));
+      - name: Check contribution evidence and local documentation links
+        # PR text is JSON data, never interpolated into a command or executed.
+        run: python scripts/check_contribution.py --metadata "$RUNNER_TEMP/contribution.json"
+      - name: Regression tests
+        run: python -B -m unittest discover -s tests -p test_contribution_policy.py

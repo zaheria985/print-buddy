@@ -35,32 +35,35 @@ def has_duration_question(text: str) -> bool:
     return bool(re.search(r'\b(how long|duration|how much time|print time|when.*finish|take)\b', str(text), re.IGNORECASE))
 
 
-# Prompts that accept a typed reply, by chat scope: (chat_id, thread_id) -> (clarify_id, parser).
+# Prompts that accept a typed reply, by who was asked where and for which intake:
+# (chat_id, thread_id, user_id, session_key) -> (clarify_id, parser). Newest last.
 _typed_prompts = {}
 
 
 def _scope(source):
-    return (str(getattr(source, 'chat_id', '')), str(getattr(source, 'thread_id', '') or ''))
+    return (str(getattr(source, 'chat_id', '')), str(getattr(source, 'thread_id', '') or ''),
+            str(getattr(source, 'user_id', '') or ''))
 
 
 def typed_reply(source, text):
-    """Route typed text to this chat's open typed prompt. Returns None when no prompt is open,
-    '' when the reply resolved it, or a corrective message (the prompt stays open)."""
+    """Route typed text to the sender's newest open typed prompt in this chat. Returns None when they
+    have none open (another operator's prompt never takes it), '' when the reply resolved it, or a
+    corrective message (the prompt stays open)."""
     from .prompts import gateway as _prompts
     cm = _prompts()
-    pending = _typed_prompts.get(_scope(source))
-    if pending is None:
+    scope = _scope(source)
+    keys = [key for key in _typed_prompts if key[:3] == scope]
+    if not scope[2] or not keys:
         return None
-    cid, parser = pending
+    cid, parser = _typed_prompts[keys[-1]]
     if str(text or '').strip().casefold() in CANCEL_WORDS:
-        cm.resolve_gateway_clarify(cid, 'cancel')
-        return ''
+        return '' if cm.resolve_gateway_clarify(cid, 'cancel') else None
     try:
         value = parser(text)
     except ValueError as exc:
         return str(exc)
-    cm.resolve_gateway_clarify(cid, str(value))
-    return ''
+    # A prompt a button already answered is closed: let the text fall through instead of swallowing it.
+    return '' if cm.resolve_gateway_clarify(cid, str(value)) else None
 
 
 CANCEL_WORDS = {'cancel', 'stop', 'nevermind', 'never mind', 'abort'}
@@ -117,6 +120,7 @@ async def ask(adapter, source, session_key, question, choices, timeout=None, all
     cancel_added = not choices or not any(term in str(choices[-1]).casefold()
                                           for term in ("cancel", "don't print", "do not print"))
     shown = list(choices) + ([CANCEL_LABEL] if cancel_added else [])
+    typed_key = _scope(source) + (str(session_key),)
     cid = None
     try:
         for attempt in range(2):
@@ -125,7 +129,8 @@ async def ask(adapter, source, session_key, question, choices, timeout=None, all
             cid = uuid.uuid4().hex
             cm.register(cid, registration_key, question, shown)
             if parser is not None:
-                _typed_prompts[_scope(source)] = (cid, parser)
+                _typed_prompts.pop(typed_key, None)  # re-added last: the newest open question takes typed text
+                _typed_prompts[typed_key] = (cid, parser)
             result = await adapter.send_clarify(chat_id=str(source.chat_id), question=question,
                 choices=shown, clarify_id=cid, session_key=session_key,
                 metadata={'thread_id': source.thread_id} if source.thread_id else None)
@@ -165,8 +170,8 @@ async def ask(adapter, source, session_key, question, choices, timeout=None, all
                 question += '\nPick a button or type split / 100% / shrink / cancel.'
         raise RuntimeError('clarification requires a valid button choice; no decision saved')
     finally:
-        if parser is not None and _typed_prompts.get(_scope(source), (None,))[0] == cid:
-            _typed_prompts.pop(_scope(source), None)
+        if parser is not None and _typed_prompts.get(typed_key, (None,))[0] == cid:
+            _typed_prompts.pop(typed_key, None)
         cm.resolve_gateway_clarify(cid, cm.CANCELLED)
         cm.wait_for_response(cid, 0.001)
 

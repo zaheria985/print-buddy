@@ -268,3 +268,15 @@ def test_discord_client_registers_commands_and_reports_connection(cfg):
                 task.cancel()
 
     run(flow())
+
+
+@pytest.mark.parametrize("name", ["Print Bitch", "Print Buddy"])
+def test_custom_name_is_used_in_help_and_wrong_channel_refusal(cfg, name):
+    cfg["discord"]["bot_name"] = name
+    discord, core = make(cfg)
+    run(core.handle_message(discord.message("/print-help")))
+    assert discord.sent[-1].startswith(f"**{name}**")
+    elsewhere = discord.add_channel(555)
+    interaction = fake_discord.FakeInteraction(discord, discord.operator, channel=elsewhere)
+    assert run(core.run_slash(interaction, "print-help", {})) is None
+    assert interaction.replies == [{"content": f"{name} only works in its print channel.", "ephemeral": True}]

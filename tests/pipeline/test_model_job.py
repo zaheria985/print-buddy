@@ -1,5 +1,6 @@
 import io
 import json
+import hashlib
 import os
 import shutil
 import sys
@@ -8,6 +9,7 @@ import time
 import unittest
 import zipfile
 import struct
+import subprocess
 
 import pytest
 from pathlib import Path
@@ -537,6 +539,107 @@ class MultipartSafetyTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "no G-code output"):
                     model_job.slice_job(job_path)
             self.assertNotIn("gcode_verified", json.loads(job_path.read_text()))
+
+class MeshTopologyAuditTests(unittest.TestCase):
+    def test_closed_tetrahedron_is_watertight_manifold(self):
+        tris = [[(0,0,0),(1,0,0),(0,1,0)], [(0,0,0),(0,1,0),(0,0,1)],
+                [(0,0,0),(0,0,1),(1,0,0)], [(1,0,0),(0,0,1),(0,1,0)]]
+        result = model_job.mesh_topology(tris)
+        self.assertEqual(result["triangle_count"], 4)
+        self.assertEqual(result["connected_shells"], 1)
+        self.assertTrue(result["watertight"])
+        self.assertTrue(result["manifold"])
+
+    def test_open_and_disconnected_meshes_are_reported(self):
+        tri = [(0,0,0),(1,0,0),(0,1,0)]
+        result = model_job.mesh_topology([tri, [(3,0,0),(4,0,0),(3,1,0)]])
+        self.assertEqual(result["connected_shells"], 2)
+        self.assertEqual(result["boundary_edges"], 6)
+        self.assertFalse(result["watertight"])
+        self.assertFalse(result["manifold"])
+
+    def test_prepared_job_audit_persists_versioned_artifact(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td)
+            path = folder / "part.stl"
+            tri = [(0,0,0),(2,0,0),(0,3,4)]
+            with path.open("wb") as f:
+                f.write(b"part".ljust(80,b" ") + struct.pack("<I",1))
+                f.write(struct.pack("<12fH",0,0,0,*(v for point in tri for v in point),0))
+            job = {"printer_model": "ad5x", "downloaded_file": str(path), "audit": model_job.audit(path, printer_model="ad5x")}
+            model_job.write_job(folder, job)
+            stored = json.loads((folder / "JOB.json").read_text())["audit"]["mesh_audit"]
+            self.assertEqual(stored["schema_version"], 1)
+            self.assertEqual(stored["source_sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+            self.assertEqual(stored["dimensions_mm"], [2.0, 3.0, 4.0])
+            self.assertEqual(stored["units"], "mm")
+            self.assertEqual(stored["printer_model"], "ad5x")
+            self.assertEqual(stored["triangle_count"], 1)
+
+    def test_vertex_only_touching_tetrahedra_is_singular(self):
+        tetra=[[(0,0,0),(1,0,0),(0,1,0)],[(0,0,0),(0,1,0),(0,0,1)],[(0,0,0),(0,0,1),(1,0,0)],[(1,0,0),(0,0,1),(0,1,0)]]
+        second=[[(0,0,0),(-1,0,0),(0,-1,0)],[(0,0,0),(0,-1,0),(0,0,-1)],[(0,0,0),(0,0,-1),(-1,0,0)],[(-1,0,0),(0,0,-1),(0,-1,0)]]
+        r=model_job.mesh_topology(tetra+second)
+        self.assertEqual(r["boundary_edges"],0); self.assertEqual(r["non_manifold_edges"],0)
+        self.assertGreaterEqual(r["singular_vertices"],1); self.assertTrue(r["watertight"]); self.assertFalse(r["manifold"])
+
+    def test_collinear_distinct_triangle_is_degenerate(self):
+        r=model_job.mesh_topology([[(0,0,0),(1,1,1),(2,2,2)]])
+        self.assertEqual(r["degenerate_triangles"],1); self.assertFalse(r["manifold"])
+
+    def test_dense_edge_fan_is_bounded(self):
+        # A child timeout makes quadratic regressions fail, rather than hang
+        # the entire test runner. 20k faces would create ~400M pair links.
+        code = (
+            "import json; from print_buddy.core.model_job import mesh_topology; "
+            "print(json.dumps(mesh_topology([[(0,0,0),(1,0,0),(0,i+1,1)] "
+            "for i in range(20000)])))"
+        )
+        proc = subprocess.run([sys.executable, "-c", code], env=CLI_ENV,
+                              capture_output=True, text=True, timeout=10)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        result = json.loads(proc.stdout)
+        self.assertEqual(result["non_manifold_edges"], 1)
+        self.assertEqual(result["connected_shells"], 1)
+        self.assertFalse(result["manifold"])
+
+    def test_near_collinear_area_threshold_and_exclusion(self):
+        result = model_job.mesh_topology([
+            [(0, 0, 0), (0.000001, 0, 0), (0.000002, 0.000001, 0)],
+            [(10, 0, 0), (11, 0, 0), (10, 1, 0)],
+        ])
+        self.assertEqual(result["triangle_count"], 2)
+        self.assertEqual(result["degenerate_triangles"], 1)
+        self.assertEqual(result["boundary_edges"], 3)
+        self.assertEqual(result["connected_shells"], 1)
+
+    def test_duplicate_vertex_degenerate_triangle_is_counted(self):
+        result = model_job.mesh_topology([[(0,0,0),(1,0,0),(1,0,0)]])
+        self.assertEqual(result["degenerate_triangles"], 1)
+        self.assertFalse(result["manifold"])
+
+    def test_cli_audit_is_json_and_does_not_change_source(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "tetra.stl"
+            tris = [[(0,0,0),(1,0,0),(0,1,0)], [(0,0,0),(0,1,0),(0,0,1)],
+                    [(0,0,0),(0,0,1),(1,0,0)], [(1,0,0),(0,0,1),(0,1,0)]]
+            with path.open("wb") as f:
+                f.write(b"tetra".ljust(80,b" ") + struct.pack("<I",len(tris)))
+                for tri in tris:
+                    f.write(struct.pack("<12fH",0,0,0,*(v for p in tri for v in p),0))
+            before = path.read_bytes()
+            proc = subprocess.run(CLI + ["audit", str(path)], env=CLI_ENV, text=True, capture_output=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            report = json.loads(proc.stdout)
+            self.assertEqual(report["triangle_count"], 4)
+            self.assertTrue(report["watertight"])
+            self.assertEqual(report["schema_version"], 1)
+            self.assertEqual(report["source_sha256"], hashlib.sha256(before).hexdigest())
+            self.assertEqual(report["dimensions_mm"], [1.0, 1.0, 1.0])
+            self.assertEqual(report["units"], "mm")
+            self.assertIsNone(report["printer_model"])
+            self.assertEqual(path.read_bytes(), before)
+
 
 class AuditTests(unittest.TestCase):
     def test_plate_count_uses_unique_plate_ids(self):

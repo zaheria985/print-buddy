@@ -30,6 +30,10 @@ message. `python3 -m print_buddy.doctor` warns when a Hermes profile holds the s
 | `bot.health_port` | `0` | Serve `GET /healthz` on this port (200 healthy, 503 not). `0` turns the HTTP check off |
 | `bot.health_stale_s` | `120` | The health check fails when the heartbeat is older than this |
 | `bot.sync_commands` | `true` | Register the slash commands with Discord at startup |
+| `logging.level` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR`. Use `DEBUG` while chasing a problem; environment: `PRINT_BUDDY__LOGGING__LEVEL` |
+| `logging.format` | `text` | `text` is one readable line per event. `json` is one JSON object per line for a log shipper |
+| `logging.file` | empty | Also write a rotating log file (5 MiB, 3 backups) at this path. Empty logs to stderr only |
+| `discord.bot_name` | `Print Buddy` | Name used in bot replies and help; environment: `PRINT_BUDDY__DISCORD__BOT_NAME` |
 | `discord.chat_id` | empty | The print channel. The bot ignores every other channel (threads inside it work) |
 | `discord.allowed_user_ids` | empty | Discord user IDs allowed to use the bot, separated by commas or spaces |
 | `discord.approval_user_id` | empty | Always allowed as well |
@@ -41,6 +45,11 @@ message. `python3 -m print_buddy.doctor` warns when a Hermes profile holds the s
 
 Every key can come from the environment as `PRINT_BUDDY__SECTION__KEY`, for example
 `PRINT_BUDDY__BOT__MODE=standalone` or `PRINT_BUDDY__DISCORD__ALLOWED_USER_IDS="111 222"`.
+
+For example, set `PRINT_BUDDY__DISCORD__BOT_NAME="Print Bitch"` in the process environment, or
+`bot_name: "Print Bitch"` inside the YAML `discord:` mapping. Docker Compose reads
+the same variable from `.env`. Restart the bot after changing it. This changes its self-description,
+not the Discord account username or server nickname; set those in Discord. The default stays `Print Buddy`.
 
 The token is only ever read from the environment variable `discord.token_env` names, or from the `.env` file in
 `paths.hermes_home` (the data folder; the name is historical, it does not need Hermes). Nobody allowed means
@@ -112,7 +121,9 @@ Required environment: `PRINT_BUDDY__BOT__MODE=standalone`, `DISCORD_BOT_TOKEN`, 
   `/print-coldpull`, `/print-maintenance`, `/print-colors`, `/spool`, `/print-help`. Typing the same text works too.
 * Listener posts (started, complete, failed, timelapse) and alert buttons (Resume, Cancel, spool questions, IFS
   insertion, plate picker) work with the Hermes gateway stopped.
-* A typed reply answers your own open question, as under Hermes ("2" for two copies, "split", "cancel").
+* A typed reply answers your own open question, as under Hermes ("2" for two copies, "split", "cancel"). It
+  never answers another allowed user's question, even in the same channel or thread. Buttons are shared: any
+  allowed user may press an open question's button, and the message then shows who chose.
 * Anything else gets the command list, or with `[llm]` set, a short reply from the model. The model may name one
   command from a fixed list (read-only or button-gated: `/print-stop`, `/print-next`, `/spool list`, ...). That
   command then asks for its button like a typed one. It can never run `/spool change`, `/spool new`,
