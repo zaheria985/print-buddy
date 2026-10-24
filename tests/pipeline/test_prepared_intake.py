@@ -1028,6 +1028,24 @@ def test_reprint_offers_last_model_and_never_downloads(env, monkeypatch):
     assert len(env.starts) == 2
 
 
+def test_reprint_after_restart_explains_interrupted_slice_and_asks_again(env):
+    run_flow(env, [1, 0, 0], mid='first')
+    prev = prepared_intake.last_job()
+    folder = Path(prev['downloaded_file']).parents[1]
+    # Left by a Print Buddy process that stopped mid-slice.
+    (folder / 'WORKER.json').write_text(json.dumps({'state': 'running', 'step': 'slicing', 'started_at': 1.0,
+                                                     'worker_pid': 1, 'owner': 'previous-run'}))
+    event = S(source=S(profile='3dprinting', chat_id='c1', thread_id=None, user_id='u'), message_id='again',
+              text='print the previous print in black')
+    adapter = Adapter([0, 1, 0, 0])  # yes reprint, slot 2, slice and print
+    asyncio.run(prepared_intake.prepare_link(event, adapter, state(), env.root, timeout=1, reuse=prev))
+    first = adapter.questions[0]['question']
+    assert 'interrupted during slicing' in first and 'asked again' in first
+    assert not (folder / 'WORKER.json').exists()  # explained once
+    # The new intake asked for its own color and bed-clear choices before starting.
+    assert len(adapter.questions) >= 3 and len(env.starts) == 2
+
+
 def test_declined_reprint_does_nothing(env):
     run_flow(env, [1, 0, 0], mid='first')
     prev = prepared_intake.last_job()

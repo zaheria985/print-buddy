@@ -101,7 +101,8 @@ class BotCore:
         client.add_listener(self.on_interaction, "on_interaction")
         self.upload_dir = Path(self.cfg["paths"]["cache"]) / "discord-uploads"
         self.llm_opener = llm_opener
-        self.help = commands.help_text(str(self.cfg["discord"].get("bot_name") or "Print Buddy"))
+        self.bot_name = str(self.cfg["discord"].get("bot_name") or "").strip() or "Print Buddy"
+        self.help = commands.help_text(self.bot_name)
         self.started_at = time.time()
 
     # ------------------------------------------------------------------ messages
@@ -202,7 +203,7 @@ class BotCore:
         chat_id, thread_id = channel_scope(interaction.channel)
         source = make_source(user.id, chat_id, thread_id, getattr(user, "bot", False))
         if not self.chat_id or chat_id != self.chat_id:
-            await interaction.response.send_message("Print Buddy only works in its print channel.", ephemeral=True)
+            await interaction.response.send_message(f"{self.bot_name} only works in its print channel.", ephemeral=True)
             return None
         if not self.gateway._is_user_authorized_for_source(source):
             await interaction.response.send_message("Not allowed. Nothing changed.", ephemeral=True)
