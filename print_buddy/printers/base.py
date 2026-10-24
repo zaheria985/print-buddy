@@ -1,17 +1,32 @@
-"""Printer model and adapter contract.
+"""Vendor profile, printer model and adapter contract.
 
-Layout: one package per brand under print_buddy/printers/, one module per printer model inside it.
+Layout: vendor first, then printer. One package per vendor under print_buddy/printers/, one module per
+printer model inside it. The [printer] model key is "<vendor>.<printer>", the package and module names.
 
-    flashforge/ad5x.py    MODEL for "flashforge.ad5x"; adapter.py (ZMod adapter); zmod/ (AD5X-only code)
-    sovol/sv06.py         MODEL for "sovol.sv06" on the stock Klipper adapter
-    klipper/generic.py    MODEL for "klipper.generic"; adapter.py (the stock Klipper adapter)
+    flashforge/__init__.py   VENDOR: Moonraker, ZMod START_PRINT start code, OrcaSlicer, .gcode
+    flashforge/ad5x.py       MODEL for "flashforge.ad5x"; adapter.py (ZMod adapter); zmod/ (AD5X-only code)
+    klipper/__init__.py      VENDOR: Moonraker, PRINT_START/PRINT_END macros, OrcaSlicer, .gcode
+    klipper/generic.py       MODEL for "klipper.generic"; adapter.py (the stock Klipper adapter)
+    sovol/__init__.py        VENDOR: the Klipper vendor profile under the Sovol name
+    sovol/sv06.py            MODEL for "sovol.sv06" on the stock Klipper adapter
+    octoprint/__init__.py    VENDOR: OctoPrint REST, plain Marlin start code, OrcaSlicer, .gcode
+    octoprint/marlin.py      MODEL for "octoprint.marlin"
+    bambulab/__init__.py     VENDOR: no live connection, Bambu start code, OrcaSlicer or Bambu Studio,
+                             .gcode.3mf handoff. Printer modules (A1, later P1S) drop in beside it.
 
-A model module defines MODEL = PrinterModel(...): the printer's settings (bed, height, nozzle, slots,
-margins, prime tower, start/end macros, cold pull), the adapter class, and the Orca template folder under
-templates/orca. printers/__init__ finds every module with a MODEL, so adding a printer is one file plus
-templates. Brand code that is not a model lives in helper modules without a MODEL or in a subpackage.
+A vendor package defines VENDOR = VendorProfile(...): what every printer of that vendor shares, namely
+the connection type, the start G-code family, the slicers it may use, the file formats it hands over,
+the delivery methods offered after a slice, and shared setting defaults (firmware, macros, layout
+margins, prime tower, cold pull). A printer module defines MODEL = PrinterModel(..., vendor=VENDOR):
+only what differs per printer (bed, height, printable-area exclusions, nozzle and material limits,
+slots, AMS), its adapter class and its Orca template folder under templates/orca. The printer's
+settings are merged over its vendor's settings, key by key, printer wins.
 
-Settings merge, later wins key by key: model defaults, YAML home config, selected YAML/TOML local config, environment.
+printers/__init__ finds every module with a MODEL, so adding a printer is one file plus templates, and
+adding a vendor is one package with an __init__ defining VENDOR. Vendor code that is not a model lives
+in helper modules without a MODEL or in a subpackage. See docs/PRINTER-PROFILES.md.
+
+Settings merge, later wins key by key: vendor defaults, printer defaults, YAML home config, selected YAML/TOML local config, environment.
 config/home.yaml picks the model with printer.model: flashforge.ad5x.
 
 Where printer specifics live, and which responsibilities sit behind PrinterAdapter:
@@ -61,8 +76,9 @@ exists to show the seam:
 from __future__ import annotations
 
 import copy
+import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -79,15 +95,109 @@ class BuildVolume:
     multi_copy_edge_mm: float
 
 
+# How Print Buddy reaches a printer. "offline" means it never does: it slices and validates, a person
+# moves the file.
+CONNECTIONS = ("moonraker", "octoprint", "offline")
+# Start G-code families. Each printer runs only its own; see start_code_problems.
+START_CODES = ("zmod", "klipper_macro", "marlin", "bambu")
+# Slicers a vendor may pick as its primary. OrcaSlicer is the default everywhere.
+SLICERS = ("orca", "bambu_studio")
+# What can happen to a validated slice, besides nothing:
+#   printer        start it on the printer through the vendor connection, behind the per-job bed-clear button
+#   discord        attach the sliced files to the Discord thread
+#   bambu_handoff  package a .gcode.3mf for Bambu Studio, Bambu Handy or the SD card; nothing is uploaded
+DELIVERY_METHODS = ("printer", "discord", "bambu_handoff")
+
+
+# Margins, prime tower and cold pull every current vendor shares. A vendor or printer overrides any key.
+SHARED_SETTINGS = {
+    "layout": {
+        # Distance from the bed edge for a lone copy and for multi copy plates.
+        "single_copy_edge_mm": 1.0,
+        "multi_copy_edge_mm": 3.0,
+        # Gaps when several source plates are merged onto one bed.
+        "merge_edge_margin_mm": 8.0,
+        "merge_spacing_mm": 10.0,
+    },
+    "prime_tower": {
+        "size_mm": 45.0,
+        # Clearance between the tower and any part.
+        "part_clearance_mm": 8.0,
+        # Closest the tower may sit to the bed edge.
+        "edge_mm": 10.0,
+        # Extra room reserved for the tower when merging plates.
+        "merge_slack_mm": 5.0,
+    },
+    # Profile name = [hot C, cold C]
+    "cold_pull": {"pla_trial": [220, 90], "petg": [245, 100]},
+}
+
+
+def merge_settings(base: dict, extra: dict) -> dict:
+    """Deep copy of base with extra merged over it, key by key."""
+    out = copy.deepcopy(base)
+    for key, value in extra.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = merge_settings(out[key], value)
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
+
+
+@dataclass(frozen=True)
+class VendorProfile:
+    """What every printer of one vendor shares. Printer models inherit it and override settings."""
+
+    key: str  # the vendor package name, the part of "vendor.printer" before the dot
+    label: str
+    connection: str  # one of CONNECTIONS
+    start_code: str  # one of START_CODES
+    # Allowed [printer] slicer values; the first is the default.
+    slicers: tuple[str, ...] = ("orca",)
+    # Tried once, isolated, after an OrcaSlicer execution failure. None disables the fallback.
+    fallback_slicer: str | None = "bambu_studio"
+    # File formats this vendor's printers take, primary first. Delivery hands over the primary format.
+    file_formats: tuple[str, ...] = (".gcode",)
+    # Delivery methods offered after a slice (DELIVERY_METHODS), and the ones on by default.
+    # [delivery] methods in config picks a subset of `delivery`.
+    delivery: tuple[str, ...] = ("printer", "discord")
+    default_delivery: tuple[str, ...] = ("printer",)
+    # Shared defaults for [printer], [layout], [prime_tower] and [cold_pull]; each printer model overrides.
+    settings: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.connection not in CONNECTIONS:
+            raise ValueError(f"vendor {self.key}: connection must be one of {CONNECTIONS}, got {self.connection!r}")
+        if self.start_code not in START_CODES:
+            raise ValueError(f"vendor {self.key}: start_code must be one of {START_CODES}, got {self.start_code!r}")
+        if not self.slicers or any(s not in SLICERS for s in self.slicers):
+            raise ValueError(f"vendor {self.key}: slicers must be from {SLICERS}, got {self.slicers!r}")
+        unknown = [m for m in (*self.delivery, *self.default_delivery) if m not in DELIVERY_METHODS]
+        if unknown:
+            raise ValueError(f"vendor {self.key}: unknown delivery methods {unknown}")
+        if not set(self.default_delivery) <= set(self.delivery):
+            raise ValueError(f"vendor {self.key}: default_delivery must be a subset of delivery")
+        if "printer" in self.delivery and self.connection == "offline":
+            raise ValueError(f"vendor {self.key}: an offline vendor cannot offer printer delivery")
+        if "bambu_handoff" in self.delivery and self.start_code != "bambu":
+            raise ValueError(f"vendor {self.key}: bambu_handoff needs Bambu start code")
+
+    def derive(self, **changes) -> "VendorProfile":
+        """A vendor that shares this one's profile, e.g. a brand whose printers run stock Klipper."""
+        from dataclasses import replace
+        return replace(self, **changes)
+
+
 @dataclass(frozen=True)
 class PrinterModel:
-    """One printer: its defaults, its adapter and its Orca template folder."""
+    """One printer of one vendor: its own defaults, its adapter and its Orca template folder."""
 
     key: str  # "brand.model", the [printer] model value
     label: str
     adapter: type  # PrinterAdapter subclass
     templates: str  # folder under print_buddy/templates/orca
-    # Defaults for [printer], [layout], [prime_tower] and [cold_pull]; config files and the environment override them.
+    # Printer-specific defaults for [printer], [layout], [prime_tower] and [cold_pull], merged over the
+    # vendor's settings. Config files and the environment override both.
     settings: dict
     # Protected-settings baseline file under config/; None uses the shared protected-settings-baseline.json.
     baseline: str | None = None
@@ -102,12 +212,28 @@ class PrinterModel:
         "tungsten_carbide",
         "diamond",
     )
+    # The vendor this printer inherits from. printers/__init__ fills it from the vendor package when a
+    # model module leaves it out, and refuses a vendor that does not match the package.
+    vendor: VendorProfile | None = None
+
+    @property
+    def vendor_key(self) -> str:
+        return self.key.split(".", 1)[0]
+
+    @property
+    def printer_key(self) -> str:
+        return self.key.split(".", 1)[1]
 
     def defaults(self) -> dict[str, Any]:
-        """Settings this model contributes, including its Orca template folder."""
-        out = copy.deepcopy(self.settings)
-        out.setdefault("printer", {})["model"] = self.key
+        """Settings this model contributes: vendor settings, then the printer's, then identity keys."""
+        out = merge_settings(self.vendor.settings if self.vendor else {}, self.settings)
+        printer = out.setdefault("printer", {})
+        printer["model"] = self.key
         out.setdefault("orca", {})["templates"] = f"print_buddy/templates/orca/{self.templates}"
+        if self.vendor is not None:
+            printer["vendor"] = self.vendor.key
+            printer["slicer"] = self.vendor.slicers[0]
+            out["delivery"] = {"methods": list(self.vendor.default_delivery)}
         return out
 
 
@@ -229,3 +355,32 @@ def basic_status(raw: dict) -> dict[str, Any]:
         "hotend_c": (raw.get("extruder") or {}).get("temperature"),
         "bed_c": (raw.get("heater_bed") or {}).get("temperature"),
     }
+
+
+# A Bambu Lab printer runs plain G/M/T codes only. Klipper macros (PRINT_START, the ZMod
+# START_PRINT ... MESH= line, CHANGE_ZCOLOR, LOAD_ZOFFSET) are another vendor's start code.
+_GCODE_WORD = re.compile(r"^[GMT]\d+(?:\.\d+)?$", re.I)
+
+
+def start_code_problems(text: str, vendor: VendorProfile) -> list[str]:
+    """Reasons this G-code must not reach a printer of `vendor`; empty when none apply.
+
+    Only Bambu start code is checked line by line: every command must be a G, M or T code, so no
+    Klipper or ZMod macro can reach Bambu hardware. Other vendors keep their existing slice guards.
+    """
+    if vendor.start_code != "bambu":
+        return []
+    foreign = []
+    for number, line in enumerate(text.splitlines(), 1):
+        command = line.split(";", 1)[0].strip()
+        if not command:
+            continue
+        word = command.split()[0]
+        if not _GCODE_WORD.match(word):
+            foreign.append(f"line {number}: {command[:60]}")
+            if len(foreign) == 3:
+                break
+    if not foreign:
+        return []
+    return [f"G-code for {vendor.label} contains non-Bambu commands (Klipper or ZMod start code?): "
+            + "; ".join(foreign)]

@@ -8,6 +8,8 @@ import os
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from print_buddy import settings
 from print_buddy.hermes import _config
 
@@ -33,3 +35,9 @@ def _test_settings():
 TEST_SETTINGS = _test_settings()
 _config.set_override(TEST_SETTINGS)
 
+
+
+@pytest.fixture(autouse=True)
+def _isolated_launch_state(tmp_path, monkeypatch):
+    """Printer leases and consumed approvals live in a per-test database, never the profile's."""
+    monkeypatch.setenv("PRINT_BUDDY_LAUNCH_DB", str(tmp_path / "print_buddy_launches.sqlite3"))

@@ -30,6 +30,7 @@ message. `python3 -m print_buddy.doctor` warns when a Hermes profile holds the s
 | `bot.health_port` | `0` | Serve `GET /healthz` on this port (200 healthy, 503 not). `0` turns the HTTP check off |
 | `bot.health_stale_s` | `120` | The health check fails when the heartbeat is older than this |
 | `bot.sync_commands` | `true` | Register the slash commands with Discord at startup |
+| `discord.bot_name` | `Print Buddy` | Name used in bot replies and help; environment: `PRINT_BUDDY__DISCORD__BOT_NAME` |
 | `discord.chat_id` | empty | The print channel. The bot ignores every other channel (threads inside it work) |
 | `discord.allowed_user_ids` | empty | Discord user IDs allowed to use the bot, separated by commas or spaces |
 | `discord.approval_user_id` | empty | Always allowed as well |
@@ -41,6 +42,11 @@ message. `python3 -m print_buddy.doctor` warns when a Hermes profile holds the s
 
 Every key can come from the environment as `PRINT_BUDDY__SECTION__KEY`, for example
 `PRINT_BUDDY__BOT__MODE=standalone` or `PRINT_BUDDY__DISCORD__ALLOWED_USER_IDS="111 222"`.
+
+For example, set `PRINT_BUDDY__DISCORD__BOT_NAME="Print Bitch"` in the process environment, or
+`bot_name: "Print Bitch"` inside the YAML `discord:` mapping. Docker Compose reads
+the same variable from `.env`. Restart the bot after changing it. This changes its self-description,
+not the Discord account username or server nickname; set those in Discord. The default stays `Print Buddy`.
 
 The token is only ever read from the environment variable `discord.token_env` names, or from the `.env` file in
 `paths.hermes_home` (the data folder; the name is historical, it does not need Hermes). Nobody allowed means

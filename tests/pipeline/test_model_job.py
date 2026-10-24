@@ -8,6 +8,7 @@ import time
 import unittest
 import zipfile
 import struct
+import subprocess
 
 import pytest
 from pathlib import Path
@@ -537,6 +538,47 @@ class MultipartSafetyTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "no G-code output"):
                     model_job.slice_job(job_path)
             self.assertNotIn("gcode_verified", json.loads(job_path.read_text()))
+
+class MeshTopologyAuditTests(unittest.TestCase):
+    def test_closed_tetrahedron_is_watertight_manifold(self):
+        tris = [[(0,0,0),(1,0,0),(0,1,0)], [(0,0,0),(0,1,0),(0,0,1)],
+                [(0,0,0),(0,0,1),(1,0,0)], [(1,0,0),(0,0,1),(0,1,0)]]
+        result = model_job.mesh_topology(tris)
+        self.assertEqual(result["triangle_count"], 4)
+        self.assertEqual(result["connected_shells"], 1)
+        self.assertTrue(result["watertight"])
+        self.assertTrue(result["manifold"])
+
+    def test_open_and_disconnected_meshes_are_reported(self):
+        tri = [(0,0,0),(1,0,0),(0,1,0)]
+        result = model_job.mesh_topology([tri, [(3,0,0),(4,0,0),(3,1,0)]])
+        self.assertEqual(result["connected_shells"], 2)
+        self.assertEqual(result["boundary_edges"], 6)
+        self.assertFalse(result["watertight"])
+        self.assertFalse(result["manifold"])
+
+    def test_duplicate_vertex_degenerate_triangle_is_counted(self):
+        result = model_job.mesh_topology([[(0,0,0),(1,0,0),(1,0,0)]])
+        self.assertEqual(result["degenerate_triangles"], 1)
+        self.assertFalse(result["manifold"])
+
+    def test_cli_audit_is_json_and_does_not_change_source(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "tetra.stl"
+            tris = [[(0,0,0),(1,0,0),(0,1,0)], [(0,0,0),(0,1,0),(0,0,1)],
+                    [(0,0,0),(0,0,1),(1,0,0)], [(1,0,0),(0,0,1),(0,1,0)]]
+            with path.open("wb") as f:
+                f.write(b"tetra".ljust(80,b" ") + struct.pack("<I",len(tris)))
+                for tri in tris:
+                    f.write(struct.pack("<12fH",0,0,0,*(v for p in tri for v in p),0))
+            before = path.read_bytes()
+            proc = subprocess.run(CLI + ["audit", str(path)], env=CLI_ENV, text=True, capture_output=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            report = json.loads(proc.stdout)
+            self.assertEqual(report["triangle_count"], 4)
+            self.assertTrue(report["watertight"])
+            self.assertEqual(path.read_bytes(), before)
+
 
 class AuditTests(unittest.TestCase):
     def test_plate_count_uses_unique_plate_ids(self):

@@ -239,3 +239,45 @@ def test_install_standalone_renders_units_and_data_folder(tmp_path):
     assert (tmp_path / "data" / "state").is_dir()
     again = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=120)
     assert again.stdout.count("unchanged") == 2
+
+
+@pytest.mark.parametrize("changes", [
+    {"host": "other-container"}, {"process_start": "reused"},
+    {"pid": 0}, {"pid": -1}, {"pid": "invalid"}, {"pid": 10 ** 100},
+    {"heartbeat_at": float("nan")}, {"heartbeat_at": time.time() + 3600},
+])
+def test_bot_health_command_rejects_foreign_or_invalid_identity(changes):
+    health.write(beat())
+    status = health.read()
+    health.path().write_text(json.dumps({**status, **changes}))
+    assert health.check(out=io.StringIO()) == 1
+
+
+def test_bot_shutdown_awaits_owned_resources(cfg):
+    from print_buddy.bot.client import PrintBuddyBot
+
+    async def flow():
+        bot = PrintBuddyBot(cfg)
+        stopped = asyncio.Event()
+        started = asyncio.Event()
+
+        async def heartbeat():
+            started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                stopped.set()
+
+        task = asyncio.create_task(heartbeat())
+        await started.wait()
+        server = mock.Mock()
+        server.wait_closed = mock.AsyncMock()
+        bot._background = [task, server]
+        with mock.patch("discord.ext.commands.Bot.close", mock.AsyncMock()):
+            await bot.close()
+        assert stopped.is_set() and task.done()
+        server.close.assert_called_once()
+        server.wait_closed.assert_awaited_once()
+        assert bot._background == [] and not bot.connected
+
+    asyncio.run(flow())
