@@ -159,6 +159,33 @@ jobs:
           PRINT_BUDDY_REAL_SLICER: "1"
         run: xvfb-run -a python -m pytest -v -s tests/corpus
 
+  real-slicer-bambu-studio:
+    # [printer] slicer: bambu_studio, the Bambu Lab default. The A1 profiles still come from the installed
+    # OrcaSlicer (profiles.py), so both Flathub apps are installed; only the Bambu Studio cases run here.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-test.txt
+      - run: python -m pip install -r requirements-test.txt
+      - name: Install Flathub Bambu Studio, OrcaSlicer 2.4.2 and xvfb
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q flatpak xvfb
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub com.orcaslicer.OrcaSlicer com.bambulab.BambuStudio
+          flatpak info --user com.orcaslicer.OrcaSlicer
+          flatpak info --user com.bambulab.BambuStudio
+      - name: Run the A1 production flow with Bambu Studio
+        env:
+          PRINT_BUDDY_REAL_SLICER: "1"
+          PB_REQUIRE_BAMBU_STUDIO: "1"
+        run: xvfb-run -a python -m pytest -v -s -k bambu_studio tests/slicer/test_orca_real_bambu_a1.py
+
   real-slicer-alpha:
     # Alpha validation is intentionally limited; full Discord corpus remains on the 2.4.2 job.
     # Flatpak plus xvfb requires a full system session and display; kept on the host runner after
