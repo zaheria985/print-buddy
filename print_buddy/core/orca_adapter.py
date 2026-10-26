@@ -551,11 +551,15 @@ FLEX_PROFILE = {
     'ironing_type': 'no ironing', 'fuzzy_skin': 'none',
 }
 
+# Designer intent carried from a 3MF's project settings over the printer template. Support keys: the
+# switch and type, plus where supports go (overhang threshold, style, critical-regions-only, small
+# overhang removal, build-plate-only); support filaments, speeds and Z gaps stay the template's (#275).
 PROCESS_KEYS = ('layer_height', 'initial_layer_print_height', 'wall_loops', 'sparse_infill_density',
                 'sparse_infill_pattern', 'brim_type', 'brim_width', 'brim_object_gap', 'enable_support',
-                'support_type', 'support_on_build_plate_only', 'top_shell_layers', 'bottom_shell_layers',
-                'top_shell_thickness', 'bottom_shell_thickness', 'gap_fill_target', 'filter_out_gap_fill',
-                'wall_generator')
+                'support_type', 'support_style', 'support_threshold_angle', 'support_critical_regions_only',
+                'support_remove_small_overhang', 'support_on_build_plate_only', 'top_shell_layers',
+                'bottom_shell_layers', 'top_shell_thickness', 'bottom_shell_thickness', 'gap_fill_target',
+                'filter_out_gap_fill', 'wall_generator')
 
 
 RANGE_ERROR = re.compile(r'^(\w+): (\S+) not in range \[([-0-9.eE+]+),([-0-9.eE+]+)\]', re.M)
@@ -599,13 +603,14 @@ def _rewrite_project_settings(path, settings, name):
     tmp.replace(path)
 
 
-def _sanitize_imported_settings(path, templates, slot_count, filament_profiles=()):
+def _sanitize_imported_settings(path, templates, slot_count, filament_profiles=(), filament_template=None):
     name = 'Metadata/project_settings.config'
     with zipfile.ZipFile(path) as archive:
         if name not in archive.namelist():
             return {}
         settings = json.loads(archive.read(name))
-    own = _template_settings(templates)
+    filament_template = Path(filament_template or Path(templates) / 'filament.json')
+    own = {**_template_settings(templates), **json.loads(filament_template.read_text())}
     changed = {}
     for key, sentinel in IMPORTED_AUTO_SENTINELS.items():
         previous = settings.get(key)
@@ -619,7 +624,7 @@ def _sanitize_imported_settings(path, templates, slot_count, filament_profiles=(
             settings[key] = replacement
             changed[key] = [previous, replacement]
     slot_count = max(1, min(int(slot_count), IFS_SLOTS))
-    template_filament = json.loads((templates / 'filament.json').read_text())
+    template_filament = json.loads(filament_template.read_text())
     per_slot_filament = tuple(key for key in template_filament if key.startswith('filament_') and not key.endswith('_settings_id'))
     for key in ('filament_z_hop_types', 'filament_wipe', 'filament_wipe_distance'):
         if key not in settings or key not in template_filament:
@@ -685,8 +690,10 @@ def _sanitize_imported_settings(path, templates, slot_count, filament_profiles=(
     return changed
 
 
-def sanitize_project_settings(path, log_text='', templates=None, slot_count=None):
-    """Normalize Orca sentinels and foreign motion/profile data on private 3MF copies."""
+def sanitize_project_settings(path, log_text='', templates=None, slot_count=None, filament_template=None):
+    """Normalize Orca sentinels and foreign motion/profile data on private 3MF copies.
+
+    filament_template is the job's filament profile; the template folder's filament.json by default."""
     del log_text
     if Path(path).suffix.lower() != '.3mf':
         return {}
@@ -700,7 +707,7 @@ def sanitize_project_settings(path, log_text='', templates=None, slot_count=None
         slot_count = max((len(imported[key]) if isinstance(imported.get(key), list) else 1
                           for key in ('filament_settings_id', 'filament_type', 'filament_colour')
                           if imported.get(key) is not None), default=1)
-    return _sanitize_imported_settings(path, templates, slot_count)
+    return _sanitize_imported_settings(path, templates, slot_count, filament_template=filament_template)
 
 
 def clamp_rejected_settings(path, log_text):
@@ -959,6 +966,10 @@ def slice_model(source, folder, state, brim=None, first_layer=False, color_decis
         color = '#' + color.lstrip('#').upper()
     from .printer_state import _material_temperature_contract
     _material_temperature_contract(state)
+    # The printer picks the filament profile for the job's material (Bambu Lab: its checked vendor profile for that
+    # base polymer, refused when there is none); the hardware record then sets type, density and temperatures.
+    filament_template = printer.filament_template(templates, state['spool']['material'])
+    filament = json.loads(Path(filament_template).read_text())
     from .nozzle import effective_nozzle_temperature
     base_nozzle_temp = float(state['temps_c']['nozzle'])
     effective_nozzle_temp = effective_nozzle_temperature(nozzle_type, base_nozzle_temp)
@@ -1061,7 +1072,7 @@ def slice_model(source, folder, state, brim=None, first_layer=False, color_decis
     # final effective configs immediately before invoking Orca.
     base_profile = {**json.loads((templates / 'machine.json').read_text()),
                     **json.loads((templates / 'process.json').read_text()),
-                    **json.loads((templates / 'filament.json').read_text())}
+                    **json.loads(Path(filament_template).read_text())}
     effective_profile = {**machine, **process, **filament}
     placed_bounds = geometry.get('placed_bounds_mm')
     if placed_bounds and len(placed_bounds) >= 2:
@@ -1118,7 +1129,7 @@ def slice_model(source, folder, state, brim=None, first_layer=False, color_decis
         # the private working copy, never the original source.
         sanitized.update(sanitize_project_settings(
             input_path, templates=templates,
-            slot_count=len(filament_paths) if mapped_profile else 1))
+            slot_count=len(filament_paths) if mapped_profile else 1, filament_template=filament_template))
     # Never accept stale output if a failed slicer leaves the preceding artifact behind.
     output.unlink(missing_ok=True)
     primary = slicer_choice(printer)

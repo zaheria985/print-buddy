@@ -48,13 +48,35 @@ else
         http://127.0.0.1:*|http://localhost:*) echo 'External Spoolman URL required when bundled API is disabled' >&2; exit 2;;
     esac
 fi
-python3 -m print_buddy.hermes.moonraker_event_listener &
-children+=("$!")
+# The Moonraker listener runs only when the configured printer model's
+# connection uses one (#256): the gate resolves the effective configuration
+# (model -> vendor connection), never the presence of a Moonraker URL, which
+# settings forbid for the other connections. Gate status: 0 = start the
+# listener, 3 = no listener for this connection, anything else = the
+# configuration could not be resolved; stop instead of guessing.
+listener_gate=0
+python3 -m print_buddy.listener_gate || listener_gate=$?
+if [ "$listener_gate" -eq 0 ]; then
+    python3 -m print_buddy.hermes.moonraker_event_listener &
+    children+=("$!")
+elif [ "$listener_gate" -eq 3 ]; then
+    echo 'Moonraker listener not started: the configured printer connection does not use one.'
+else
+    echo "Listener gate failed (status $listener_gate); configuration unresolved, stopping container." >&2
+    exit "$listener_gate"
+fi
 if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
     python3 -m print_buddy.bot &
     children+=("$!")
 else
-    echo 'DISCORD_BOT_TOKEN is empty; bot disabled; listener and Spoolman remain active.'
+    echo 'DISCORD_BOT_TOKEN is empty; bot disabled.'
+fi
+if [ "${#children[@]}" -eq 0 ]; then
+    # Nothing to supervise for this configuration (no listener, no bot, no
+    # bundled Spoolman): stay up idling instead of exiting into a restart loop.
+    echo 'No supervised children for this configuration; idling.'
+    sleep infinity &
+    children+=("$!")
 fi
 status=0
 wait -n "${children[@]}" || status=$?

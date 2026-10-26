@@ -15,7 +15,7 @@ print stay separate unless --print-now is given, which means the operator clicke
 "bed clear" for exactly this job. `python3 -m print_buddy.core.model_job print-now FILE|JOB.json` starts an
 already sliced job the same way.
 """
-import argparse, hashlib, html, json, math, os, re, shutil, subprocess, sys, time, urllib.parse, urllib.request, zipfile
+import argparse, hashlib, html, json, logging, math, os, re, shutil, subprocess, sys, time, urllib.parse, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -23,6 +23,17 @@ from typing import Any, NamedTuple
 from .. import printers, settings
 from ..printers.base import MultiColorUnsupported
 from . import _external, launch_state, printer_state
+
+logger = logging.getLogger(__name__)
+
+# Bambu Lab start confirmation (#271): the printer can take well over a minute after `project_file`
+# to unpack the package and report it, so one snapshot is not evidence. Poll this often, for the
+# [bambu] start_confirm_s window (default below). Both hooks are module attributes so tests can
+# drive the window with a fake clock instead of sleeping.
+BAMBU_START_CONFIRM_S = 90
+BAMBU_START_POLL_S = 10
+_confirm_clock = time.monotonic
+_confirm_sleep = time.sleep
 
 PROFILE = settings.current()["paths"]["hermes_home"]
 STATE = settings.state_dir()/"printer_hardware.json"
@@ -53,7 +64,12 @@ def download(url, target):
 
 
 def maker_headers():
-    token=(Path.home()/".config/bambu/token").read_text().strip()
+    path=Path.home()/".config/bambu/token"
+    try:
+        token=path.read_text().strip()
+    except FileNotFoundError:
+        raise RuntimeError(f"MakerWorld links need an account token in {path}; "
+                           "see docs/PROJECT-REFERENCE.md (MakerWorld account token)") from None
     if not token: raise RuntimeError("MakerWorld token empty")
     return {"Authorization":f"Bearer {token}", "Origin":"https://makerworld.com",
             "Referer":"https://makerworld.com/", "x-bbl-app-source":"makerworld"}
@@ -607,8 +623,12 @@ def build_slot_labels(selections):
     return labels
 
 
-def validate_filament_selection(selection):
-    """Validate a job-bound, user-confirmed filament selection."""
+def validate_filament_selection(selection, spool_optional=False):
+    """Validate a job-bound, user-confirmed filament selection.
+
+    `spool_optional` admits a selection with no Spoolman ID; only a single-extruder printer's unbound spool
+    gets it (resolve_filament_selection, #263).
+    """
     if not isinstance(selection, dict):
         raise ValueError("explicit filament selection is required (use 'filament-select' command)")
     slot = selection.get("slot")
@@ -618,17 +638,39 @@ def validate_filament_selection(selection):
         if not isinstance(selection.get(key), str) or not selection[key].strip():
             raise ValueError(f"filament {key} is required")
     spool_id = selection.get("spoolman_id")
-    if not isinstance(spool_id, int) or isinstance(spool_id, bool) or spool_id <= 0:
+    if not (spool_id is None and spool_optional) and (
+            not isinstance(spool_id, int) or isinstance(spool_id, bool) or spool_id <= 0):
         raise ValueError("a positive Spoolman spool ID is required")
     return {"slot": slot, "color": selection["color"].strip(),
             "material": selection["material"].strip(), "spoolman_id": spool_id}
+
+
+def configured_slots(state):
+    """The slot records intake offers, keyed by slot number.
+
+    A recorded `ifs_slots` map is used as is. A single-extruder printer with no slot map has one slot,
+    its configured spool (#263): slot entries are only written from Spoolman, so an offline printer never
+    gets one. Printers with several slots or bays (AD5X IFS, stock Flashforge) still need their recorded map.
+    """
+    mappings = (state or {}).get("ifs_slots") or {}
+    if mappings or printers.current().slot_count != 1:
+        return mappings
+    spool = (state or {}).get("spool") or {}
+    material = spool.get("material")
+    if not isinstance(material, str) or not material.strip():
+        return {}
+    # The spool's recorded label is its color name; "loaded" names it without inventing a color.
+    color = next((v.strip() for v in (spool.get("color"), spool.get("name")) if isinstance(v, str) and v.strip()),
+                 "loaded")
+    return {"1": {"color": color, "material": material.strip(), "spoolman_id": spool.get("spoolman_id")}}
 
 
 def resolve_filament_selection(state, selection):
     """Resolve metadata from the requested slot, never the globally active spool.
 
     Configured slot labels are consistency checks, not proof of physical loading.
-    An unmapped slot requires an explicit spool ID rather than an inferred one.
+    An unmapped slot requires an explicit spool ID rather than an inferred one. A single-extruder
+    printer's slot whose spool has no Spoolman binding needs none (#263); Spoolman is advisory (#235).
     """
     if not isinstance(selection, dict):
         return validate_filament_selection(selection)
@@ -636,19 +678,20 @@ def resolve_filament_selection(state, selection):
     slot = selection.get("slot")
     if not isinstance(slot, int) or isinstance(slot, bool) or not 1 <= slot <= IFS_SLOTS:
         raise ValueError(f"filament slot must be an integer from 1 through {IFS_SLOTS}")
-    mappings = state.get("ifs_slots", {})
+    mappings = configured_slots(state)
     configured = mappings.get(str(slot), {}) if isinstance(mappings, dict) else {}
     if not isinstance(configured, dict):
         raise ValueError(f"slot {slot} configured mapping is invalid")
     mapped_id = configured.get("spoolman_id")
+    unbound = bool(configured) and mapped_id is None and printers.current().slot_count == 1
     if selection.get("spoolman_id") is None:
-        if mapped_id is None:
+        if mapped_id is None and not unbound:
             raise ValueError(f"slot {slot} requires an explicit Spoolman spool ID; no configured mapping")
         selection["spoolman_id"] = mapped_id
     for key in ("color", "material"):
         if selection.get(key) is None and configured.get(key) is not None:
             selection[key] = configured[key]
-    selection = validate_filament_selection(selection)
+    selection = validate_filament_selection(selection, spool_optional=unbound)
     if mapped_id is not None and selection["spoolman_id"] != mapped_id:
         raise ValueError(f"slot {slot} spool mismatch: requested #{selection['spoolman_id']}, configured #{mapped_id}")
     def canonical_color(value):
@@ -3017,7 +3060,10 @@ def slice_job(job_path, brim_override=None, copies=None, scale=None, recipe_sha2
         preserved = (layout_report.get("preserved_3mf_package") or {}).get("preserved_3mf")
         slice_src = rearrange_dir / (preserved or layout_report["exported_3mf_geometry_only"])
         job["layout_report"] = str(rearrange_dir / "validation.json")
-    decision_sha = decisions_digest(decisions)
+    # A single-slot printer slices as `generic`, which leaves `decisions` as None, but the Discord
+    # intake has still written color_decisions into JOB.json. The post-slice check below hashes
+    # the file's decisions, so hash the same thing here or every such slice is refused (#268).
+    decision_sha = decisions_digest(decisions if not generic else job.get("color_decisions"))
     selected_slot = None if generic else (job.get("filament_selection") or {}).get("slot")
     scale_kw = {'scale': scale} if scale is not None else {}
     if adapter.key != printers.current().key:
@@ -3109,6 +3155,11 @@ def prepare_first_layer(slot, color, material, spoolman_id, slicer="orca"):
 
 def gcode_estimate_s(text):
     m=re.search(r'^; estimated printing time \(normal mode\) = (.+)$',text,re.M)
+    if not m:
+        # Bambu Studio (and Orca's header block) write "; model printing time: 1h 2m 3s; total estimated
+        # time: 1h 7m 3s" instead (#271): printing time first, the slicer's total as the fallback.
+        m=(re.search(r'^;.*?\bmodel printing time\s*:\s*([^;\n]+)',text,re.M)
+           or re.search(r'^;.*?\btotal estimated time\s*:\s*([^;\n]+)',text,re.M))
     if not m: return None
     return sum(int(n)*{"d":86400,"h":3600,"m":60,"s":1}[u] for n,u in re.findall(r'(\d+)\s*([dhms])',m.group(1))) or None
 
@@ -4009,6 +4060,70 @@ def _print_octoprint(adapter, state, gcode, job, job_path, wait_s, reprint):
     return out
 
 
+def _bambu_start_confirm_window():
+    """[bambu] start_confirm_s: how long a Bambu start is polled for confirmation (default 90 s)."""
+    value = (settings.current().get("bambu") or {}).get("start_confirm_s", BAMBU_START_CONFIRM_S)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return float(BAMBU_START_CONFIRM_S)
+    return float(value)
+
+
+def _bambu_reports_file(live, remote):
+    """True when a normalized Bambu status shows `remote` running or preparing.
+
+    `printing` covers gcode_state RUNNING, PREPARE and SLICING: an A1 unpacking a package sits
+    in PREPARE before RUNNING, and both prove the start reached it. The file name is the
+    `subtask_name` the start command set, so exact; the bare project name (the printer's
+    display spelling of the same package) is accepted too.
+    """
+    if live.get("state") != "printing":
+        return False
+    reported = str(live.get("filename") or "")
+    if not reported:
+        return False
+    accepted = {remote}
+    for suffix in (".gcode.3mf", ".3mf"):
+        if remote.endswith(suffix):
+            accepted.add(remote[:-len(suffix)])
+    return reported in accepted
+
+
+def _confirm_bambu_start(client, adapter, remote, job_path, window_s, poll_s=BAMBU_START_POLL_S):
+    """Poll status snapshots until the printer reports `remote` running or preparing, or `window_s` ends.
+
+    Returns (confirmed, last normalized status, snapshots taken). Every snapshot is logged at INFO
+    and written to the job's TIMING.jsonl (state, gcode_state, file, print_stage) so an unconfirmed start
+    leaves evidence of what the printer said, not just that it said nothing (#271). A read error
+    counts as a snapshot and the window keeps running; the last readable status is what is reported.
+    """
+    started = _confirm_clock()
+    deadline = started + window_s
+    last_good, snapshots = {}, 0
+    while True:
+        snapshots += 1
+        error = None
+        try:
+            live = adapter.normalize_status(client.snapshot())
+            last_good = live
+        except RuntimeError as exc:
+            live, error = {}, " ".join(str(exc).split())
+        evidence = {"snapshot": snapshots, "elapsed_s": round(_confirm_clock() - started, 1),
+                    "state": live.get("state"), "gcode_state": live.get("gcode_state"),
+                    "file": live.get("filename"), "print_stage": live.get("stage")}
+        if error:
+            evidence["error"] = error
+        logger.info("Bambu start confirmation snapshot %d at %ss: state=%s gcode_state=%s file=%r stage=%s%s",
+                    snapshots, evidence["elapsed_s"], evidence["state"], evidence["gcode_state"],
+                    evidence["file"], evidence["print_stage"], f" error={error}" if error else "")
+        _timing(job_path, "bambu_start_confirm", **evidence)
+        if _bambu_reports_file(live, remote):
+            return True, live, snapshots
+        remaining = deadline - _confirm_clock()
+        if remaining <= 0:
+            return False, last_good, snapshots
+        _confirm_sleep(min(poll_s, remaining))
+
+
 def _print_bambu(adapter, state, gcode, job, job_path, wait_s, reprint):
     """The Bambu Lab LAN print path (#187 stage d), mirroring _print_octoprint's guard order.
 
@@ -4019,7 +4134,8 @@ def _print_bambu(adapter, state, gcode, job, job_path, wait_s, reprint):
     the snapshot and readiness are taken again, the bed-clear approval is consumed, and
     only then does anything reach the printer: FTPS upload (size-verified), then the
     project_file command. Upload + start are one uncertain step from submitting() on,
-    exactly as for OctoPrint; acceptance is confirmed from a fresh snapshot, never assumed.
+    exactly as for OctoPrint; acceptance is confirmed from fresh snapshots polled over the
+    [bambu] start_confirm_s window (#271), never assumed from the command being accepted.
     """
     from . import delivery as _delivery
 
@@ -4082,20 +4198,21 @@ def _print_bambu(adapter, state, gcode, job, job_path, wait_s, reprint):
             raise SystemExit(f"Bambu Lab submission failed or uncertain: {exc}. Do not resubmit without "
                              "checking printer status.") from exc
         raise
-    # Accepted is not proof of printing. No resubmission on delayed readback.
-    live = {}
-    try:
-        live = adapter.normalize_status(client.snapshot())
-    except RuntimeError:
-        pass
-    confirmed = live.get("state") == "printing" and live.get("filename") == remote
+    # Accepted is not proof of printing. No resubmission on delayed readback: the printer is polled
+    # over the confirmation window (#271) and the lease stays uncertain if it never reports this file.
+    window_s = _bambu_start_confirm_window()
+    confirmed, live, snapshots = _confirm_bambu_start(client, adapter, remote, job_path, window_s)
     if confirmed:
         lease.release()
     else:
-        lease.uncertain("submitted, awaiting confirmation")
+        lease.uncertain("submitted, awaiting confirmation; printer reported state "
+                        f"{live.get('state') or 'unknown'} ({live.get('gcode_state') or 'no gcode_state'}), "
+                        f"file {live.get('filename') or 'none'!r} on the last of {snapshots} snapshot(s) "
+                        f"over {window_s:g}s")
     out = {"started": confirmed, "accepted": True, "file": remote, "method": "bambulab_lan",
            "phase": "executing" if confirmed else "awaiting_confirmation",
            "outcome": "printing" if confirmed else "unconfirmed", "live": live,
+           "confirmation": {"snapshots": snapshots, "window_s": window_s},
            "message": "printing" if confirmed else "submitted, awaiting confirmation; do not resubmit"}
     if confirmed:
         try:

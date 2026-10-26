@@ -11,6 +11,7 @@ ZMod/AD5X code and has no Moonraker or cloud client.
 """
 import json
 import os
+from pathlib import Path
 
 from ..base import MultiColorUnsupported, PrinterAdapter
 from . import guard, profiles
@@ -131,6 +132,27 @@ class BambuAdapter(PrinterAdapter):
         """
         return profiles.require(self)
 
+    def filament_template(self, templates, material):
+        """The checked vendor filament profile for material (profiles.filament_template), or ProfileError.
+
+        In the verified generated folder the profile is re-verified. An [orca] templates override may carry its own
+        filaments/<MATERIAL>.json or a filament.json of that material; the guard still holds the output to the
+        verified profiles. A material with no profile is refused either way.
+        """
+        templates = Path(templates)
+        if templates.resolve() == self.pinned_templates_folder().resolve():
+            return profiles.filament_template(self, material, templates)
+        key = profiles.material_key(material)
+        own = templates / profiles.FILAMENTS / f"{key}.json"
+        if own.is_file():
+            return own
+        default = templates / "filament.json"
+        kind = profiles._first(json.loads(default.read_text()).get("filament_type"))
+        if profiles.material_key(kind) != key:
+            raise profiles.ProfileError(f"{self.label}: the [orca] templates folder {templates} has no {key} filament "
+                                        f"profile (its filament.json is {kind}). Nothing was sliced")
+        return default
+
     def gcode_problems(self, text, state=None):
         return guard.gcode_problems(text, self, state=state)
 
@@ -204,8 +226,11 @@ class BambuAdapter(PrinterAdapter):
             return {"state": "unknown", "filename": "", "progress": None, "hotend_c": None, "bed_c": None}
         percent = payload.get("mc_percent")
         remaining = payload.get("mc_remaining_time")
+        gcode_state = str(payload.get("gcode_state") or "").upper()
         return {
-            "state": _GCODE_STATES.get(str(payload.get("gcode_state") or "").upper(), "unknown"),
+            "state": _GCODE_STATES.get(gcode_state, "unknown"),
+            "gcode_state": gcode_state,  # the raw Bambu value, kept for start-confirmation evidence (#271)
+            "stage": payload.get("mc_print_stage"),
             "filename": payload.get("subtask_name") or payload.get("gcode_file") or "",
             "progress": percent / 100 if isinstance(percent, (int, float)) and not isinstance(percent, bool) else None,
             "hotend_c": _number(payload.get("nozzle_temper")),

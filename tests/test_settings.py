@@ -172,7 +172,7 @@ class OverrideTests(unittest.TestCase):
             "prime_tower": {"size_mm", "part_clearance_mm", "edge_mm", "merge_slack_mm"},
             "cold_pull": {"pla_trial", "petg"},
             "orca": {"templates", "command"},
-            "bambu": {"command", "lan_host", "lan_serial", "lan_access_code_env"},
+            "bambu": {"command", "lan_host", "lan_serial", "lan_access_code_env", "start_confirm_s"},
             "slicer": {"flash_studio_path"},
             "flashforge_stock": {"host"},
             "paths": {"hermes_home", "archive", "records_vault", "cache", "hermes_bin", "ffmpeg",
@@ -184,6 +184,8 @@ class OverrideTests(unittest.TestCase):
                         "safety_confirm_timeout_s", "upload_wait_s", "cold_pull_outcome_s",
                         "token_env", "allowed_user_ids"},
             "telegram": {"token_env", "chat_id", "allowed_user_ids", "approval_user_id", "upload_max_bytes"},
+            "matrix": {"homeserver_url", "access_token_env", "room_id", "allowed_user_ids",
+                       "approval_user_id", "bot_user_id", "upload_max_bytes"},
             "bot": {"mode", "platform", "health_port", "health_stale_s", "sync_commands"},
             "llm": {"chat_url", "model", "api_key_env", "timeout_s"},
             "listener": {"tick_s", "ifs_presence_poll_s", "spool_nag_s", "start_claim_ttl_s"},
@@ -202,6 +204,23 @@ class OverrideTests(unittest.TestCase):
             with self.subTest(section=section):
                 self.assertEqual(set(inventory[section]), keys)
         self.assertTrue(all("security" not in key and "safety" not in key for key in inventory))
+
+    def test_bambu_start_confirm_window_defaults_and_limits(self):
+        home = self.toml(Path(settings.LEGACY_HOME).read_text(), "legacy-home.toml")
+        self.assertEqual(settings.load(home=home, local=False, environ={})["bambu"]["start_confirm_s"], 90)
+        env = {"PRINT_BUDDY__BAMBU__START_CONFIRM_S": "120"}
+        self.assertEqual(settings.load(home=home, local=False, environ=env)["bambu"]["start_confirm_s"], 120)
+        # An older home file without the key still accepts it from the environment and from YAML.
+        older = self.toml(Path(settings.LEGACY_HOME).read_text().replace("start_confirm_s = 90\n", ""), "older-home.toml")
+        self.assertEqual(settings.load(home=older, local=False, environ={})["bambu"]["start_confirm_s"], 90)
+        self.assertEqual(settings.load(home=older, local=False, environ=env)["bambu"]["start_confirm_s"], 120)
+        local = self.toml("bambu:\n  start_confirm_s: 60\n", "local.yaml")
+        self.assertEqual(settings.load(home=older, local=local, environ={})["bambu"]["start_confirm_s"], 60)
+        for bad, message in (("0", "positive"), ("301", "at most 300")):
+            with self.assertRaisesRegex(settings.SettingsError, message):
+                settings.load(home=home, local=False, environ={"PRINT_BUDDY__BAMBU__START_CONFIRM_S": bad})
+        with self.assertRaisesRegex(settings.SettingsError, "whole number"):
+            settings.load(home=home, local=self.toml("bambu:\n  start_confirm_s: 12.5\n", "frac.yaml"), environ={})
 
     def test_docker_yaml_matches_legacy_toml_effective_settings(self):
         docker_yaml = settings.ROOT / "config" / "docker.yaml"
@@ -342,6 +361,53 @@ class RuntimeSettingsTests(unittest.TestCase):
                              ({"SPOOL_NAG_SECONDS": "ten"}, "should be a number"),
                              ({"PRINT_BUDDY__COLD_PULL__PETG": "1"}, "list")]:
             with self.subTest(env=env), self.assertRaisesRegex(settings.SettingsError, message):
+                settings.load(local=False, environ=env)
+
+    def test_delivery_methods_env_list_is_parsed_and_validated(self):
+        """PRINT_BUDDY__DELIVERY__METHODS (#270): comma- or space-separated, checked like the YAML list."""
+        a1 = {"PRINT_BUDDY__PRINTER__MODEL": "bambulab.a1"}
+        for raw in ("discord,bambu_handoff,printer", "discord bambu_handoff printer", " printer , discord,  bambu_handoff "):
+            with self.subTest(raw=raw):
+                data = settings.load(local=False, environ={**a1, "PRINT_BUDDY__DELIVERY__METHODS": raw})
+                methods = data["delivery"]["methods"]
+                self.assertIsInstance(methods, list)
+                self.assertTrue(all(type(m) is str for m in methods))
+                # Vendor order, like the YAML value: the post-slice buttons follow it.
+                self.assertEqual(methods, ["printer", "discord", "bambu_handoff"])
+        # The .env.example line itself loads for the printer it is written for.
+        example = next(line.split("=", 1)[1] for line in (settings.ROOT / ".env.example").read_text().splitlines()
+                       if line.startswith("# PRINT_BUDDY__DELIVERY__METHODS="))
+        data = settings.load(local=False, environ={**a1, "PRINT_BUDDY__DELIVERY__METHODS": example})
+        self.assertIn("printer", data["delivery"]["methods"])
+        # A value the Bambu vendor does not offer is refused, naming the key, exactly like YAML.
+        for raw in ("discord,sd_card", "printer,Discord"):
+            with self.subTest(raw=raw), self.assertRaisesRegex(settings.SettingsError, r"\[delivery\] methods .* not offered"):
+                settings.load(local=False, environ={**a1, "PRINT_BUDDY__DELIVERY__METHODS": raw})
+        # A list of only separators is an empty list, refused like `methods: []` in YAML.
+        with self.assertRaisesRegex(settings.SettingsError, r"\[delivery\] methods must be a non-empty list"):
+            settings.load(local=False, environ={**a1, "PRINT_BUDDY__DELIVERY__METHODS": ","})
+        # The Flashforge vendor offers no Bambu handoff: the same check applies to every vendor.
+        with self.assertRaisesRegex(settings.SettingsError, r"\[delivery\] methods \['bambu_handoff'\] are not offered"):
+            settings.load(local=False, environ={"PRINT_BUDDY__DELIVERY__METHODS": "bambu_handoff"})
+
+    def test_delivery_methods_env_wins_over_yaml_and_yaml_stands_when_env_unset(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        local = Path(tmp.name) / "local.yaml"
+        local.write_text("printer:\n  model: bambulab.a1\ndelivery:\n  methods: [discord]\n")
+        self.assertEqual(settings.load(local=local, environ={})["delivery"]["methods"], ["discord"])
+        # An empty value leaves the file value alone, like every other Docker feature variable left blank.
+        self.assertEqual(settings.load(local=local, environ={"PRINT_BUDDY__DELIVERY__METHODS": ""})["delivery"]["methods"],
+                         ["discord"])
+        data = settings.load(local=local, environ={"PRINT_BUDDY__DELIVERY__METHODS": "discord,printer"})
+        self.assertEqual(data["delivery"]["methods"], ["printer", "discord"])
+        # The vendor default stands when neither the file nor the environment sets it: `printer` is never a default.
+        self.assertEqual(settings.load(local=False, environ={"PRINT_BUDDY__PRINTER__MODEL": "bambulab.a1"})["delivery"]["methods"],
+                         ["discord", "bambu_handoff"])
+
+    def test_other_lists_stay_file_only(self):
+        for env in ({"PRINT_BUDDY__ORCA__COMMAND": "orca-slicer"}, {"PRINT_BUDDY__PRINTER__BED_MM": "220,220"}):
+            with self.subTest(env=env), self.assertRaisesRegex(settings.SettingsError, "cannot come from the environment"):
                 settings.load(local=False, environ=env)
 
     def test_moonraker_url_derives_websocket_and_camera(self):

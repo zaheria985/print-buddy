@@ -234,3 +234,17 @@ def test_redact_hides_telegram_bot_tokens_including_in_api_urls():
     assert token not in cleaned and "AA" + "x" * 33 not in cleaned
     assert "https://api.telegram.org/bot***/sendMessage" in cleaned
     assert logs.redact("Print started at 12:34 for cube.stl") == "Print started at 12:34 for cube.stl"
+
+
+def test_redact_hides_matrix_access_tokens_and_leaves_user_ids_alone():
+    # Built from parts so no token shaped string sits in the source.
+    token = "syt_" + "aBcDeF0123" + "_" + "xYz987wVu" + "_2"
+    for line in (f"login failed for {token}",
+                 f"Authorization: Bearer {token}",
+                 f"GET https://hs.example/_matrix/client/v3/sync?access_token={token}&since=s1"):
+        cleaned = logs.redact(line)
+        assert token not in cleaned and "***" in cleaned
+    query = logs.redact(f"GET https://hs.example/_matrix/client/v3/sync?access_token={token}&since=s1")
+    assert "since=s1" in query
+    ordinary = "@catduck:matrix.org posted in !prints:matrix.org at 12:34"
+    assert logs.redact(ordinary) == ordinary

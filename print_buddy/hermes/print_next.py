@@ -252,9 +252,22 @@ def question_text(target: Mapping[str, Any]) -> str:
 
 def live_idle_check() -> None:
     """Fresh read-only printer state query. Raises unless the printer is provably idle."""
+    from print_buddy import printers
     from print_buddy.core import printer_state
     from print_buddy.core.model_job import _printer_phase
 
+    transport = getattr(printers.current(), "transport", None)
+    if transport in ("bambulab_lan", "octoprint"):
+        # No Moonraker on these printers: _printer_phase would build a bare /printer/objects/query
+        # path and fail with "unknown url type". printer_state.check already reads the adapter's own
+        # live status and readiness problems (the signature bit, HMS errors, busy state); print-now
+        # repeats every gate after this (#269).
+        ok, problems, facts = printer_state.check(printer_state.load())
+        if transport == "bambulab_lan" and not facts.get("lan_configured"):
+            raise RuntimeError("Bambu LAN status is not configured ([bambu] lan_host and lan_serial plus the access code)")
+        if not ok:
+            raise RuntimeError("; ".join(problems) or "printer readiness problems")
+        return
     state, filename, busy = _printer_phase(printer_state.load())
     if state not in ("standby", "complete", "cancelled") or busy == "Printing":
         raise RuntimeError(f"printer is not idle ({state}, {filename}, {busy})")

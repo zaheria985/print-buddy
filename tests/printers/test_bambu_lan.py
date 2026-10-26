@@ -187,6 +187,9 @@ def test_normalize_status_maps_the_snapshot_to_the_common_shape():
     out = a.normalize_status(snap)
     assert (out["state"], out["progress"], out["hotend_c"], out["bed_c"]) == ("printing", 0.42, 210.5, 59.5)
     assert out["filename"] == "benchy.gcode.3mf" and out["remaining_min"] == 87 and out["writes_blocked"] is True
+    assert out["gcode_state"] == "RUNNING" and out["stage"] is None  # raw state and mc_print_stage kept (#271)
+    prepare = a.normalize_status({"print": {"gcode_state": "prepare", "mc_print_stage": "2"}})
+    assert (prepare["state"], prepare["gcode_state"], prepare["stage"]) == ("printing", "PREPARE", "2")
     assert a.normalize_status({"print": {"gcode_state": "IDLE"}})["state"] == "standby"
     assert a.normalize_status({"print_stats": {"state": "printing"}})["state"] == "unknown"  # Moonraker shape
 

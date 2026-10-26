@@ -15,6 +15,10 @@ from . import _config
 
 _HASH = re.compile(r"[0-9a-f]{32,}", re.I)
 _TIME = re.compile(r"^; estimated printing time \(normal mode\) = (.+)$", re.M)
+# Bambu Studio (and Orca's header block) write "; model printing time: 1h 2m; total estimated time: 1h 5m"
+# instead of the line above (#271): printing time first, the slicer's total as the fallback.
+_BAMBU_TIME = (re.compile(r"^;.*?\bmodel printing time\s*:\s*([^;\n]+)", re.M),
+               re.compile(r"^;.*?\btotal estimated time\s*:\s*([^;\n]+)", re.M))
 ARCHIVE = _config.archive_dir()
 CONTEXT_PATH = _config.state_file("PRINT_BUDDY_CONTEXT_PATH", "print_buddy_context.json")
 WARMUP_S = 5 * 60
@@ -67,7 +71,7 @@ def gcode_metadata(gcode):
             text = handle.read()
     except OSError:
         return None, None
-    match = _TIME.search(text)
+    match = _TIME.search(text) or next((m for m in (p.search(text) for p in _BAMBU_TIME) if m), None)
     filament = re.search(r"^;\s*total filament used \[g\]\s*=\s*([\d.]+)", text, re.M)
     return (parse_duration(match.group(1)) if match else None,
             float(filament.group(1)) if filament else None)

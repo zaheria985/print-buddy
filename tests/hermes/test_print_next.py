@@ -623,3 +623,50 @@ def test_start_spawns_print_now_from_the_repo_root(tmp_path):
     assert not ok
     assert seen['kwargs']['cwd'] == str(settings.ROOT)
     assert seen['argv'][1:3] == ('-m', print_next.MODEL_JOB_MODULE)
+
+
+def _adapter_with(monkeypatch, transport, check):
+    """Route live_idle_check through a fake adapter transport and a fake printer_state.check."""
+    from print_buddy import printers
+    from print_buddy.core import model_job, printer_state
+    monkeypatch.setattr(printers, 'current', lambda: S(transport=transport))
+    monkeypatch.setattr(printer_state, 'load', lambda: {'printer': 'fake'})
+    monkeypatch.setattr(printer_state, 'check', lambda st: check)
+    monkeypatch.setattr(model_job, '_printer_phase',
+                        lambda st: pytest.fail('Moonraker queried for a non-Moonraker printer'))
+
+
+def test_live_idle_check_uses_the_adapter_status_for_bambu_lan(monkeypatch):
+    # #269: a Bambu printer has no Moonraker; the idle check must read the adapter's live status.
+    _adapter_with(monkeypatch, 'bambulab_lan', (True, [], {'lan_configured': True, 'bambu': {'state': 'standby'}}))
+    print_next.live_idle_check()
+
+
+def test_live_idle_check_refuses_bambu_readiness_problems(monkeypatch):
+    _adapter_with(monkeypatch, 'bambulab_lan', (False, ['printer reports 1 active HMS error(s)'], {'lan_configured': True}))
+    with pytest.raises(RuntimeError, match='HMS'):
+        print_next.live_idle_check()
+
+
+def test_live_idle_check_refuses_an_unconfigured_bambu_lan(monkeypatch):
+    _adapter_with(monkeypatch, 'bambulab_lan', (True, [], {'lan_configured': False}))
+    with pytest.raises(RuntimeError, match='not configured'):
+        print_next.live_idle_check()
+
+
+def test_live_idle_check_uses_the_adapter_status_for_octoprint(monkeypatch):
+    _adapter_with(monkeypatch, 'octoprint', (True, [], {'octoprint': {'state': 'Operational'}}))
+    print_next.live_idle_check()
+
+
+def test_live_idle_check_still_queries_moonraker_for_moonraker_printers(monkeypatch):
+    from print_buddy import printers
+    from print_buddy.core import model_job, printer_state
+    monkeypatch.setattr(printers, 'current', lambda: S(transport='moonraker'))
+    monkeypatch.setattr(printer_state, 'load', lambda: {})
+    monkeypatch.setattr(printer_state, 'check', lambda st: pytest.fail('adapter status used for a Moonraker printer'))
+    monkeypatch.setattr(model_job, '_printer_phase', lambda st: ('standby', '', 'Ready'))
+    print_next.live_idle_check()
+    monkeypatch.setattr(model_job, '_printer_phase', lambda st: ('printing', 'a.gcode', 'Printing'))
+    with pytest.raises(RuntimeError, match='not idle'):
+        print_next.live_idle_check()

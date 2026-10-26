@@ -26,7 +26,7 @@ def checks(cfg):
     name = str(cfg["bot"].get("platform") or "discord")
     implemented = platform.platform_module(name) is not None
     add("platform", implemented, name if implemented else
-        f"{name}; platform {name!r} is not implemented yet (#164) — discord and telegram are available")
+        f"{name}; platform {name!r} is not implemented yet (#164) — discord, telegram and matrix are available")
     if name == "discord":
         token_env = cfg["discord"]["token_env"]
         add("token", bool(_config.discord_token()), f"${token_env} is set" if _config.discord_token()
@@ -47,6 +47,19 @@ def checks(cfg):
         users = allowed_users(cfg, "telegram")
         add("allowed users", bool(users), f"{len(users)} user(s)" if users
             else "none: set telegram.allowed_user_ids (or approval_user_id); everyone is refused")
+    elif name == "matrix":
+        from .matrix import matrix_token
+        token_env = cfg["matrix"]["access_token_env"]
+        add("token", bool(matrix_token(cfg)), f"${token_env} is set" if matrix_token(cfg)
+            else f"${token_env} is empty; put the Matrix access token in that environment variable")
+        homeserver = str(cfg["matrix"]["homeserver_url"] or "")
+        add("homeserver", homeserver.startswith(("http://", "https://")),
+            homeserver or "matrix.homeserver_url is empty")
+        room = str(cfg["matrix"]["room_id"] or "")
+        add("print room", room.startswith("!"), room or "matrix.room_id is empty")
+        users = allowed_users(cfg, "matrix")
+        add("allowed users", bool(users), f"{len(users)} user(s)" if users
+            else "none: set matrix.allowed_user_ids (or approval_user_id); everyone is refused")
     label, available, detail = platform.library_status(name)
     add(label, available, detail)
     try:
@@ -66,10 +79,10 @@ def checks(cfg):
         add("state dir", True, str(state))
     except OSError as exc:
         add("state dir", False, f"not writable: {exc}")
-    if name == "telegram":
-        # Telegram is a pure bot (#164 stage 2, #73): the LLM fallback is
-        # never wired for it, whatever [llm] says for other platforms.
-        add("llm", True, "off (Telegram is a pure bot: no LLM; unmatched messages get the command list)")
+    if name in ("telegram", "matrix"):
+        # Telegram and Matrix are pure bots (#164 stages 2-3, #73): the LLM
+        # fallback is never wired for them, whatever [llm] says elsewhere.
+        add("llm", True, f"off ({name.capitalize()} is a pure bot: no LLM; unmatched messages get the command list)")
     else:
         add("llm", True, f"{cfg['llm']['model']} at {cfg['llm']['chat_url']}" if llm.configured(cfg)
             else "off (unmatched messages get the command list)")
@@ -102,6 +115,9 @@ def run():
         return run_bot(cfg)
     if name == "telegram":
         from .telegram import run_bot
+        return run_bot(cfg)
+    if name == "matrix":
+        from .matrix import run_bot
         return run_bot(cfg)
     print(f"Platform {name!r} is not implemented yet (#164).", file=sys.stderr)  # unreachable while checks report it, kept as a guard
     return 2

@@ -1,0 +1,403 @@
+"""Matrix delivery and sync client for the standalone bot (#164 stage 3).
+
+The Matrix implementation of the platform interface in
+``print_buddy.bot.platform``, standard library only (the Client-Server API
+calls live in ``print_buddy.bot.matrix_rest``). Matrix is a pure bot, like
+Telegram: this module never imports or calls the LLM fallback, the adapter
+reports ``uses_llm = False``, and ``BotCore`` therefore answers unmatched
+text with the command list only, even when ``[llm]`` is configured.
+
+One configured room is the print chat; threads are out of scope, and
+encrypted rooms are out of scope — ``m.room.encrypted`` events are ignored,
+so the room must be unencrypted (see docs/MATRIX-BOT-SETUP.md).
+
+Matrix has no native buttons, so prompts are a numbered choice list
+("Reply with the number, or the choice text") resolved through the typed
+answer path. The number-to-choice translation happens in this adapter, so
+the core prompt registry only ever sees real choice text.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+import sys
+from pathlib import Path
+from types import SimpleNamespace as S
+
+from .. import settings
+from ..core import prompts
+from . import health
+from . import matrix_rest as mx
+from .platform import BasePlatformAdapter, SendResult
+from .rest import chunks, split_media
+
+logger = logging.getLogger(__name__)
+
+HEARTBEAT_S = 15
+SYNC_TIMEOUT_MS = 30_000
+SINCE_FILE = "matrix-next-batch"
+_NUMBER = re.compile(r"(\d{1,3})\s*[.)]?")
+
+
+def library_status():
+    """(label, available, detail) for the offline check: stdlib only, always available."""
+    return ("matrix", True, "standard library client")
+
+
+def matrix_token(cfg=None):
+    """The Matrix access token: the [matrix] access_token_env variable, then the profile .env files."""
+    from ..hermes import _config
+    cfg = cfg if cfg is not None else _config.cfg()
+    name = str((cfg.get("matrix") or {}).get("access_token_env") or "MATRIX_ACCESS_TOKEN")
+    return _config.profile_env_value(name)
+
+
+def homeserver_url(cfg=None):
+    from ..hermes import _config
+    cfg = cfg if cfg is not None else _config.cfg()
+    return str((cfg.get("matrix") or {}).get("homeserver_url") or "").rstrip("/")
+
+
+def _attachment(mxc_url, name, size=0):
+    async def save(target, _mxc=mxc_url):
+        raise RuntimeError("attachment is not bound to a Matrix client")
+
+    return S(filename=str(name), size=int(size or 0), save=save, mxc=str(mxc_url))
+
+
+def parse_event(event, room_id, bot_user_id=""):
+    """A room timeline event as the namespace BotCore.handle_message consumes, or None.
+
+    Only plain ``m.room.message`` events from the configured room count:
+    encrypted events, edits (``m.replace`` relations) and the bot's own
+    messages are not new messages.
+    """
+    if not isinstance(event, dict) or event.get("type") != "m.room.message":
+        return None
+    sender = str(event.get("sender") or "")
+    if not sender or (bot_user_id and sender == bot_user_id):
+        return None
+    content = event.get("content") or {}
+    if not isinstance(content, dict):
+        return None
+    relates = content.get("m.relates_to") or {}
+    if isinstance(relates, dict) and relates.get("rel_type") == "m.replace":
+        return None
+    msgtype = content.get("msgtype")
+    attachments = []
+    if msgtype in ("m.file", "m.image", "m.video", "m.audio") and content.get("url"):
+        info = content.get("info") or {}
+        attachments.append(_attachment(content["url"],
+                                       content.get("filename") or content.get("body") or "file",
+                                       info.get("size") if isinstance(info, dict) else 0))
+        text = ""
+    elif msgtype == "m.text":
+        text = str(content.get("body") or "")
+    else:
+        return None
+    return S(author=S(id=sender, bot=False), channel=S(id=str(room_id), parent_id=None),
+             content=text, id=event.get("event_id"), attachments=attachments)
+
+
+class StandaloneAdapter(BasePlatformAdapter):
+    """Sends through the Matrix Client-Server API. ``allowed`` holds the @user:server IDs that may act."""
+
+    name = "matrix"
+    message_limit = mx.LIMIT
+    supports_buttons = False
+    max_buttons = 0
+    uses_llm = False
+
+    def __init__(self, client, allowed, *, registry=prompts, upload_max_bytes=None,
+                 homeserver=None, token=None, opener=None):
+        super().__init__(allowed, registry=registry)
+        self.client = client
+        self.upload_max_bytes = int(upload_max_bytes) if upload_max_bytes else 50_000_000
+        self.homeserver = homeserver if homeserver is not None else getattr(client, "homeserver", "")
+        self.token = token if token is not None else getattr(client, "token", "")
+        self.opener = opener if opener is not None else getattr(client, "opener", None)
+
+    # ------------------------------------------------------------------ delivery
+
+    async def send(self, chat_id, content, reply_to=None, metadata=None):
+        body, paths = split_media(content)
+        pieces = chunks(body, self.message_limit)
+        first = None
+        try:
+            for piece in pieces:
+                if not piece and paths:
+                    continue
+                sent = await asyncio.to_thread(mx.send_message, self.homeserver, self.token,
+                                               str(chat_id), piece, opener=self.opener)
+                first = first or sent
+            for path in paths:
+                sent = await asyncio.to_thread(mx.send_file, self.homeserver, self.token,
+                                               str(chat_id), path, opener=self.opener)
+                first = first or sent
+        except Exception as exc:
+            logger.warning("Matrix send failed: %r", exc)
+            return SendResult(False, error=str(exc))
+        return SendResult(True, message_id=first or None)
+
+    async def send_clarify(self, chat_id, question, choices, clarify_id, session_key, metadata=None):
+        """The question plus a numbered choice list; answers come back as typed replies."""
+        labels = [str(c) for c in choices]
+        pieces = chunks(question, self.message_limit)
+        try:
+            for piece in pieces[:-1]:
+                await asyncio.to_thread(mx.send_message, self.homeserver, self.token,
+                                        str(chat_id), piece, opener=self.opener)
+            listing = "\n".join(f"{index}. {label}" for index, label in enumerate(labels, 1))
+            text = f"{pieces[-1]}\n\n{listing}\nReply with the number, or the choice text."
+            event_id = await asyncio.to_thread(mx.send_message, self.homeserver, self.token,
+                                               str(chat_id), text, opener=self.opener)
+        except Exception as exc:
+            logger.warning("Matrix prompt failed: %r", exc)
+            return SendResult(False, error=str(exc))
+        self._record_prompt(clarify_id, {"event_id": event_id, "room_id": str(chat_id),
+                                         "choices": labels, "question": pieces[-1]})
+        return SendResult(True, message_id=event_id or None)
+
+    # ------------------------------------------------------------------ answers
+
+    async def answer_typed(self, session_key, text):
+        """A typed reply, with a bare number ('2', '2.') translated to that choice's text first."""
+        text = str(text or "").strip()
+        match = _NUMBER.fullmatch(text)
+        if match:
+            cid = self.open_prompt(session_key)
+            if cid is not None:
+                labels = self.registry.choices(cid) or (self._prompts.get(cid) or {}).get("choices") or []
+                index = int(match.group(1)) - 1
+                if 0 <= index < len(labels):
+                    text = labels[index]
+        return await super().answer_typed(session_key, text)
+
+    async def close_prompt(self, clarify_id, note):
+        """No message edit on Matrix: a short follow-up message records the answer."""
+        row = self._prompts.pop(str(clarify_id), None)
+        if not row:
+            return
+        try:
+            await asyncio.to_thread(mx.send_message, self.homeserver, self.token,
+                                    row["room_id"], f"> {note}", opener=self.opener)
+        except Exception:
+            logger.debug("could not post the prompt answer note", exc_info=True)
+
+
+class MatrixClient:
+    """Long-polling /sync client shim with the surface BotCore and the health code need.
+
+    ``user`` is the bot's own Matrix account, ``core`` the BotCore once
+    started. The sync ``next_batch`` token is persisted in the state dir,
+    so a restart resumes where the last run stopped instead of replaying
+    room history; the very first run starts from "now".
+    """
+
+    def __init__(self, cfg, homeserver, token, *, opener=None, state_path=None):
+        self.cfg = cfg
+        self.homeserver = str(homeserver or "").rstrip("/")
+        self.token = token
+        self.opener = opener
+        self.core = None
+        self.user = None
+        self.connected = False
+        self.room_id = str((cfg.get("matrix") or {}).get("room_id") or "")
+        self.bot_user_id = str((cfg.get("matrix") or {}).get("bot_user_id") or "")
+        self._since = None
+        self._background = []
+        self._state_path = Path(state_path) if state_path else None
+
+    # -------------------------------------------------------------- sync state
+
+    def _since_path(self):
+        if self._state_path is not None:
+            return self._state_path
+        return settings.state_dir(self.cfg) / SINCE_FILE
+
+    def _load_since(self):
+        try:
+            return self._since_path().read_text(encoding="utf-8").strip() or None
+        except OSError:
+            return None
+
+    def _save_since(self):
+        if not self._since:
+            return
+        try:
+            path = self._since_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(self._since, encoding="utf-8")
+        except OSError:
+            logger.debug("could not persist the Matrix sync token", exc_info=True)
+
+    # -------------------------------------------------------------- attachments
+
+    def _bind(self, message_ns):
+        """Point a parsed message's attachments at this client's downloader."""
+        homeserver, token, opener = self.homeserver, self.token, self.opener
+        for attachment in message_ns.attachments:
+            mxc_url = attachment.mxc
+
+            async def save(target, _mxc=mxc_url, _hs=homeserver, _token=token, _opener=opener):
+                data = await asyncio.to_thread(mx.download_media, _hs, _token, _mxc, opener=_opener)
+                Path(target).write_bytes(data)
+
+            attachment.save = save
+        return message_ns
+
+    # -------------------------------------------------------------- event routing
+
+    def parse(self, event):
+        bot_id = self.bot_user_id or (str(self.user.id) if self.user is not None else "")
+        return parse_event(event, self.room_id, bot_id)
+
+    async def handle_event(self, event):
+        parsed = self.parse(event)
+        if parsed is None or self.core is None:
+            return None
+        return await self.core.handle_message(self._bind(parsed))
+
+    def _room_events(self, data):
+        rooms = (data or {}).get("rooms") or {}
+        joined = rooms.get("join") or {}
+        room = joined.get(self.room_id) or {}
+        timeline = room.get("timeline") or {}
+        events = timeline.get("events")
+        return events if isinstance(events, list) else []
+
+    async def _maybe_join(self, data):
+        """Accept an invitation to the print room when one shows up in /sync."""
+        invited = ((data or {}).get("rooms") or {}).get("invite") or {}
+        if self.room_id not in invited:
+            return
+        try:
+            await asyncio.to_thread(mx.join_room, self.homeserver, self.token, self.room_id,
+                                    opener=self.opener)
+            logger.info("joined the print room %s", self.room_id)
+        except Exception:
+            logger.warning("could not join the print room %s", self.room_id, exc_info=True)
+
+    async def poll_once(self):
+        data = await asyncio.to_thread(mx.sync, self.homeserver, self.token, self._since,
+                                       timeout_ms=SYNC_TIMEOUT_MS, opener=self.opener)
+        await self._maybe_join(data)
+        handled = 0
+        for event in self._room_events(data):
+            try:
+                if await self.handle_event(event) is not None:
+                    handled += 1
+            except Exception:
+                logger.exception("Matrix event handling failed")
+        if (data or {}).get("next_batch"):
+            self._since = str(data["next_batch"])
+            self._save_since()
+        return handled
+
+    # -------------------------------------------------------------- lifecycle
+
+    async def start(self):
+        from .runtime import BotCore
+        bot_id = self.bot_user_id
+        if not bot_id:
+            me = await asyncio.to_thread(mx.whoami, self.homeserver, self.token, opener=self.opener)
+            bot_id = str((me or {}).get("user_id") or "")
+        self.bot_user_id = bot_id
+        self.user = S(id=bot_id)
+        self.core = BotCore(self, self.cfg, chat_id=self.room_id)
+        limit = await asyncio.to_thread(mx.media_config, self.homeserver, self.token, opener=self.opener)
+        if limit:  # the server's media cap wins when it is lower (best effort)
+            self.core.adapter.upload_max_bytes = min(self.core.adapter.upload_max_bytes or limit, limit)
+        saved = self._load_since()
+        if saved:
+            self._since = saved
+        else:  # first run: start from now, never replay room history
+            data = await asyncio.to_thread(mx.sync, self.homeserver, self.token, None,
+                                           timeout_ms=0, opener=self.opener)
+            await self._maybe_join(data)
+            self._since = str((data or {}).get("next_batch") or "") or None
+            self._save_since()
+        self.connected = True
+        logger.info("logged in as %s; print room %s; %d allowed user(s); handlers: %s",
+                    bot_id, self.core.chat_id, len(self.core.adapter.allowed),
+                    ", ".join(self.core.router.handler_names()))
+        health.write(self.core.status(True))
+        self._background.append(asyncio.create_task(self._heartbeat()))
+        port = int(self.cfg["bot"].get("health_port") or 0)
+        if port:
+            server = await health.serve(port, lambda: self.core.status(self.connected))
+            self._background.append(server)
+            logger.info("health check on :%d/healthz", port)
+
+    async def _heartbeat(self):
+        while self.connected:
+            try:
+                health.write(self.core.status(self.connected))
+            except Exception:
+                logger.exception("heartbeat write failed")
+            await asyncio.sleep(HEARTBEAT_S)
+
+    async def run(self):
+        await self.start()
+        try:
+            while True:
+                try:
+                    await self.poll_once()
+                except Exception:
+                    logger.exception("Matrix sync failed; retrying")
+                    await asyncio.sleep(2)
+        finally:
+            await self.close()
+
+    async def close(self):
+        self.connected = False
+        loop = asyncio.get_running_loop()
+        for item in self._background:
+            if isinstance(item, asyncio.Task):
+                item.cancel()
+            else:
+                item.close()
+        # Only tasks owned by this loop can be awaited here; a task from a
+        # previous loop (close called after a restart, or from a test's
+        # second asyncio.run) is cancelled above and left to its own loop.
+        tasks = [item for item in self._background
+                 if isinstance(item, asyncio.Task) and item.get_loop() is loop]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for item in self._background:
+            if not isinstance(item, asyncio.Task):
+                try:
+                    await item.wait_closed()
+                except RuntimeError:
+                    pass  # the health server belonged to a previous loop
+        self._background.clear()
+        try:
+            from print_buddy.core import owned_worker
+            await owned_worker.shutdown()
+        except Exception:
+            logger.exception("stopping intake workers failed")
+        try:
+            if self.core is not None:
+                health.write(self.core.status(False))
+        except Exception:
+            pass
+
+
+def run_bot(cfg):
+    """Start the Matrix bot for ``cfg``; the entry point ``print_buddy.bot.run`` delegates here."""
+    token = matrix_token(cfg)
+    if not token:
+        name = str((cfg.get("matrix") or {}).get("access_token_env") or "MATRIX_ACCESS_TOKEN")
+        print(f"Matrix access token is empty: put it in the ${name} environment variable.", file=sys.stderr)
+        return 3
+    homeserver = homeserver_url(cfg)
+    if not homeserver:
+        print("Matrix homeserver is empty: set [matrix] homeserver_url.", file=sys.stderr)
+        return 3
+    client = MatrixClient(cfg, homeserver, token)
+    try:
+        asyncio.run(client.run())
+    except KeyboardInterrupt:
+        return 0
+    return 0

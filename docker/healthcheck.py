@@ -10,8 +10,10 @@ import urllib.request
 # Same pattern as tests/docker/image_probe.py and docker/slicer-smoke.py.
 sys.path.insert(0, "/app")
 
+from print_buddy import settings
 from print_buddy.bot.health import check as bot_check
 from print_buddy.healthcheck import check as listener_check
+from print_buddy.healthcheck import listener_required
 
 
 def main():
@@ -20,9 +22,20 @@ def main():
         healthy &= bot_check() == 0
     else:
         print("ok  Discord bot disabled by empty token")
-    ok, reason = listener_check()
-    print(f"{'ok' if ok else 'FAIL'}  listener: {reason}")
-    healthy &= ok
+    # The listener is required exactly when the supervisor started it: the
+    # configured model's connection decides (#256), mirroring the disabled-bot
+    # branch above. An unresolved configuration fails instead of passing.
+    try:
+        required = listener_required()
+    except settings.SettingsError as exc:
+        print(f"FAIL  listener: configuration unresolved: {exc}")
+        required, healthy = None, False
+    if required:
+        ok, reason = listener_check()
+        print(f"{'ok' if ok else 'FAIL'}  listener: {reason}")
+        healthy &= ok
+    elif required is not None:
+        print("ok  listener: not required for this printer connection")
     try:
         url = ("http://127.0.0.1:" + os.environ.get("SPOOLMAN_PORT", "8000")
                if os.environ.get("PRINT_BUDDY_BUNDLED_SPOOLMAN", "true") == "true"

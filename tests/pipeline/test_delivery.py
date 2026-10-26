@@ -282,3 +282,39 @@ def test_multi_plate_partial_delivery_reports_each_plate(tmp_path, monkeypatch):
                        "Nothing was uploaded to a printer or started.")
     [entry] = receipt["deliveries"]
     assert [f["ok"] for f in entry["files"]] == [True, False] and entry["detail"] == "1 of 2 sent"
+
+
+def test_bambu_package_carries_the_plate_previews_the_a1_and_the_apps_read(tmp_path, bambu_model):
+    """#275: Metadata/plate_<n>.png (512) and plate_<n>_small.png (128), rendered offline from the sliced geometry."""
+    import io
+    from PIL import Image
+    from .test_plate_thumbnail import box_stl
+    job, gcodes, _ = _job_with(tmp_path, "G28\nG1 X1 E1\n")
+    box_stl(gcodes[0].parent / "geometry.stl", origin=(100, 100, 0))
+    cfg = config_for(BAMBU_KEY)
+    package = delivery.bambu_handoff({**job, "printer_model": BAMBU_KEY}, gcodes, cfg)[0]
+    with zipfile.ZipFile(package) as archive:
+        names = set(archive.namelist())
+        assert {"Metadata/plate_1.gcode", "Metadata/plate_1.gcode.md5", "Metadata/slice_info.config",
+                "Metadata/plate_1.png", "Metadata/plate_1_small.png"} <= names
+        assert not any(n.startswith("Metadata/pick_") or n.startswith("Metadata/top_") for n in names)
+        assert archive.read("Metadata/plate_1.gcode") == gcodes[0].read_bytes()
+        assert archive.read("Metadata/plate_1.gcode.md5").decode() == hashlib.md5(gcodes[0].read_bytes()).hexdigest().upper()
+        for name, size in (("Metadata/plate_1.png", 512), ("Metadata/plate_1_small.png", 128)):
+            image = Image.open(io.BytesIO(archive.read(name)))
+            assert image.format == "PNG" and image.size == (size, size)
+        assert "png" not in archive.read("Metadata/slice_info.config").decode()  # Bambu's slice_info names no images
+    first = package.read_bytes()
+    assert delivery.bambu_handoff({**job, "printer_model": BAMBU_KEY}, gcodes, cfg)[0].read_bytes() == first
+
+
+def test_bambu_package_without_a_preview_source_is_still_built(tmp_path, bambu_model, monkeypatch):
+    job, gcodes, _ = _job_with(tmp_path, "G28\nG1 X1 E1\n")
+    cfg = config_for(BAMBU_KEY)
+    with zipfile.ZipFile(delivery.bambu_handoff({**job, "printer_model": BAMBU_KEY}, gcodes, cfg)[0]) as archive:
+        assert not [n for n in archive.namelist() if n.endswith(".png")]
+    # A renderer failure is cosmetic: logged, never a refused delivery.
+    monkeypatch.setattr(delivery.plate_thumbnail, "plate_thumbnails",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no preview")))
+    with zipfile.ZipFile(delivery.bambu_handoff({**job, "printer_model": BAMBU_KEY}, gcodes, cfg)[0]) as archive:
+        assert "Metadata/plate_1.gcode" in archive.namelist() and not [n for n in archive.namelist() if n.endswith(".png")]

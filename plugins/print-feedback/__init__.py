@@ -55,12 +55,12 @@ def _wait_key(source):
             str(getattr(source, 'thread_id', '') or ''))
 
 
-# Platforms whose standalone sources these handlers serve (#164): Discord
-# and, since stage 2, Telegram. The gate was never really "is this Discord"
-# but "is this our bot's print source"; Hermes gateway behaviour for the
-# Discord profile is unchanged, and Telegram sources only exist when an
-# operator runs the Telegram standalone bot (or a Telegram gateway).
-BOT_PLATFORMS = frozenset({'discord', 'telegram'})
+# Platforms whose standalone sources these handlers serve (#164): Discord,
+# Telegram (stage 2) and Matrix (stage 3). The gate was never really "is
+# this Discord" but "is this our bot's print source"; Hermes gateway
+# behaviour for the Discord profile is unchanged, and Telegram/Matrix
+# sources only exist when an operator runs that standalone bot.
+BOT_PLATFORMS = frozenset({'discord', 'telegram', 'matrix'})
 
 
 def _platform_value(source):

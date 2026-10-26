@@ -321,7 +321,7 @@ def preview_sentence(job, row):
             plates = len((row or {}).get('plates') or [])
             text += (f" Model page estimate: about {mj.human_dur(site[0])}"
                      f" and {round(site[1])} g of filament{f' over {plates} plates' if plates > 1 else ''}."
-                     ' The AD5X figure after slicing will differ somewhat.')
+                     f' The {printers.current().display_name} figure after slicing will differ somewhat.')
         else:
             text += ' The model page gives no time or filament estimate; I will report both after slicing.'
     return text
@@ -985,7 +985,7 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
                                        metadata=metadata)
                     return {'action': 'skip', 'reason': 'inch-confirmed model exceeds printer volume'}
         selections = [mj.resolve_filament_selection(state, dict(label, slot=int(slot)))
-                      for slot, label in sorted(state.get('ifs_slots', {}).items())]
+                      for slot, label in sorted(mj.configured_slots(state).items())]
         labels = mj.build_slot_labels(selections)
         if not labels or len(labels) > IFS_SLOTS or len(set(labels)) != len(labels):
             raise ValueError('requires one to four distinct configured slots')

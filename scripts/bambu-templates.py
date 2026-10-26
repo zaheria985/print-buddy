@@ -8,7 +8,9 @@ OrcaSlicer (the folder that holds profiles/BBL.json and profiles/BBL/; a Flatpak
 `flatpak info --show-location com.orcaslicer.OrcaSlicer`/files/share/OrcaSlicer/resources), resolves the
 printer's profiles, refuses unless they hash to an identity recorded in print_buddy/printers/bambulab/facts.py,
 and writes them with Print Buddy's overrides into <state>/orca-profiles/<printer> for the configured profile.
-Nothing is downloaded and nothing is written into the repository.
+That includes one checked filament profile per material the printer lists (`orca_filaments`; A1 and P1S: PLA, PETG,
+TPU, PVA); slicing picks the one for the loaded material. Nothing is downloaded and nothing is written into the
+repository.
 
 --check writes nothing: it reports whether the installed OrcaSlicer has a checked identity and whether the
 generated folder (if any) is current. Exit 1 on any problem.
@@ -33,23 +35,27 @@ def main():
     from print_buddy.printers.bambulab import profiles
     model = importlib.import_module(f"print_buddy.printers.bambulab.{a.printer}").MODEL
     adapter = printers.get(model.key, settings.load(environ={**os.environ, "PRINT_BUDDY__PRINTER__MODEL": model.key}))
+    materials = profiles.filament_set(adapter) or {"default": adapter.fact("orca_profiles")["filament"]}
+    checked = ", ".join(f"{m} ({name})" for m, name in materials.items())
     try:
-        upstream, version = profiles.flatten(a.resources, adapter.fact("orca_profiles"))
-        hashes = {kind: profiles.sha256(upstream[kind]) for kind in profiles.KINDS}
         if a.check:
-            known = profiles.identity(adapter, hashes, version)
-            if known is None:
-                raise profiles.ProfileError(f"{a.resources}: vendor version {version}, sha256 {hashes} is not a "
-                                            f"checked {model.label} identity")
+            _, _, _, known = profiles.check_resources(adapter, a.resources)
             found = profiles.problems(adapter)
-            print(f"{a.resources}: {known['label']} matches" + (f"; generated folder: {'; '.join(found)}"
-                                                                 if found else "; generated folder is current"))
+            for material in profiles.filament_set(adapter):
+                try:
+                    profiles.filament_template(adapter, material)
+                except profiles.ProfileError as exc:
+                    found.append(str(exc))
+            print(f"{a.resources}: {known['label']} matches for {checked}"
+                  + (f"; generated folder: {'; '.join(dict.fromkeys(found))}" if found
+                     else "; generated folder is current"))
             return 1 if found else 0
         known = profiles.install(adapter, a.resources)
     except profiles.ProfileError as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 1
-    print(f"wrote {model.label} Orca templates from {known['label']} to {adapter.pinned_templates_folder()}")
+    print(f"wrote {model.label} Orca templates from {known['label']} to {adapter.pinned_templates_folder()}; "
+          f"filament profiles: {checked}")
     return 0
 
 

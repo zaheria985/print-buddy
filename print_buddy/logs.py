@@ -8,7 +8,7 @@ What it gives every log line:
 
 * a timestamp with time zone, a severity and the logger name (the component), as text or one JSON object per line
 * optional bound context such as the intake id (``bind``), appended to every line while it is bound
-* redaction of Discord tokens, bearer tokens, ``token=``/``password=`` style values, URL credentials and the
+* redaction of Discord, Telegram and Matrix tokens, bearer tokens, ``token=``/``password=`` style values, URL credentials and the
   value of any ``*_TOKEN``/``*_KEY``/``*_SECRET``/``*_PASSWORD`` environment variable, in the message,
   the arguments and the traceback, for every handler
 
@@ -40,6 +40,9 @@ _context: contextvars.ContextVar[dict] = contextvars.ContextVar("print_buddy_log
 
 _SECRET_ENV_SUFFIXES = ("_TOKEN", "_KEY", "_SECRET", "_PASSWORD")
 _PATTERNS = (
+    # Matrix access token: the syt_... form a homeserver issues. Fires
+    # bare, in an Authorization header and after ?access_token= alike.
+    (re.compile(r"\bsyt_[A-Za-z0-9_\-]{10,}(?:[.=][A-Za-z0-9_\-]+)*"), REDACTED),
     # Telegram bot token: bot id, colon, secret. Also fires inside an
     # api.telegram.org/bot<token>/ URL, where the token is in the path.
     (re.compile(r"\d{5,16}:[A-Za-z0-9_-]{30,40}\b"), REDACTED),
