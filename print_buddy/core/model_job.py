@@ -607,8 +607,12 @@ def build_slot_labels(selections):
     return labels
 
 
-def validate_filament_selection(selection):
-    """Validate a job-bound, user-confirmed filament selection."""
+def validate_filament_selection(selection, spool_optional=False):
+    """Validate a job-bound, user-confirmed filament selection.
+
+    `spool_optional` admits a selection with no Spoolman ID; only a single-extruder printer's unbound spool
+    gets it (resolve_filament_selection, #263).
+    """
     if not isinstance(selection, dict):
         raise ValueError("explicit filament selection is required (use 'filament-select' command)")
     slot = selection.get("slot")
@@ -618,17 +622,39 @@ def validate_filament_selection(selection):
         if not isinstance(selection.get(key), str) or not selection[key].strip():
             raise ValueError(f"filament {key} is required")
     spool_id = selection.get("spoolman_id")
-    if not isinstance(spool_id, int) or isinstance(spool_id, bool) or spool_id <= 0:
+    if not (spool_id is None and spool_optional) and (
+            not isinstance(spool_id, int) or isinstance(spool_id, bool) or spool_id <= 0):
         raise ValueError("a positive Spoolman spool ID is required")
     return {"slot": slot, "color": selection["color"].strip(),
             "material": selection["material"].strip(), "spoolman_id": spool_id}
+
+
+def configured_slots(state):
+    """The slot records intake offers, keyed by slot number.
+
+    A recorded `ifs_slots` map is used as is. A single-extruder printer with no slot map has one slot,
+    its configured spool (#263): slot entries are only written from Spoolman, so an offline printer never
+    gets one. Printers with several slots or bays (AD5X IFS, stock Flashforge) still need their recorded map.
+    """
+    mappings = (state or {}).get("ifs_slots") or {}
+    if mappings or printers.current().slot_count != 1:
+        return mappings
+    spool = (state or {}).get("spool") or {}
+    material = spool.get("material")
+    if not isinstance(material, str) or not material.strip():
+        return {}
+    # The spool's recorded label is its color name; "loaded" names it without inventing a color.
+    color = next((v.strip() for v in (spool.get("color"), spool.get("name")) if isinstance(v, str) and v.strip()),
+                 "loaded")
+    return {"1": {"color": color, "material": material.strip(), "spoolman_id": spool.get("spoolman_id")}}
 
 
 def resolve_filament_selection(state, selection):
     """Resolve metadata from the requested slot, never the globally active spool.
 
     Configured slot labels are consistency checks, not proof of physical loading.
-    An unmapped slot requires an explicit spool ID rather than an inferred one.
+    An unmapped slot requires an explicit spool ID rather than an inferred one. A single-extruder
+    printer's slot whose spool has no Spoolman binding needs none (#263); Spoolman is advisory (#235).
     """
     if not isinstance(selection, dict):
         return validate_filament_selection(selection)
@@ -636,19 +662,20 @@ def resolve_filament_selection(state, selection):
     slot = selection.get("slot")
     if not isinstance(slot, int) or isinstance(slot, bool) or not 1 <= slot <= IFS_SLOTS:
         raise ValueError(f"filament slot must be an integer from 1 through {IFS_SLOTS}")
-    mappings = state.get("ifs_slots", {})
+    mappings = configured_slots(state)
     configured = mappings.get(str(slot), {}) if isinstance(mappings, dict) else {}
     if not isinstance(configured, dict):
         raise ValueError(f"slot {slot} configured mapping is invalid")
     mapped_id = configured.get("spoolman_id")
+    unbound = bool(configured) and mapped_id is None and printers.current().slot_count == 1
     if selection.get("spoolman_id") is None:
-        if mapped_id is None:
+        if mapped_id is None and not unbound:
             raise ValueError(f"slot {slot} requires an explicit Spoolman spool ID; no configured mapping")
         selection["spoolman_id"] = mapped_id
     for key in ("color", "material"):
         if selection.get(key) is None and configured.get(key) is not None:
             selection[key] = configured[key]
-    selection = validate_filament_selection(selection)
+    selection = validate_filament_selection(selection, spool_optional=unbound)
     if mapped_id is not None and selection["spoolman_id"] != mapped_id:
         raise ValueError(f"slot {slot} spool mismatch: requested #{selection['spoolman_id']}, configured #{mapped_id}")
     def canonical_color(value):

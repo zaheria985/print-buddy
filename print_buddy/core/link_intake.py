@@ -177,7 +177,7 @@ async def ask(adapter, source, session_key, question, choices, timeout=None, all
 
 
 async def collect_link(event, adapter, state, root, timeout=300):
-    from .model_job import resolve_filament_selection, build_slot_labels
+    from .model_job import resolve_filament_selection, build_slot_labels, configured_slots
     source = event.source
     url = model_link(event.text)
     message_id = getattr(event, 'message_id', None)
@@ -198,7 +198,7 @@ async def collect_link(event, adapter, state, root, timeout=300):
         return {'action': 'skip', 'reason': 'duplicate model-link event'}
     try:
         selections = [resolve_filament_selection(state, dict(label, slot=int(slot)))
-                      for slot, label in sorted(state.get('ifs_slots', {}).items())]
+                      for slot, label in sorted(configured_slots(state).items())]
         labels = build_slot_labels(selections)
         if not labels or len(labels) > settings.current()['printer']['ifs_slots'] or len(set(labels)) != len(labels):
             raise ValueError('requires one to four distinct configured slots')
