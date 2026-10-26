@@ -1,6 +1,7 @@
 """Offline deterministic checks around Orca slicing; no printer or slicer calls."""
 from __future__ import annotations
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -132,9 +133,10 @@ def _mm(value):
     return "?" if value is None else f"{value:g}"
 
 # G-codes allowed in a checked toolpath. Moves, modes, E-only G92, dwell, units, Bambu clog detection (G392) and the in-print nozzle
-# clump and head-wrap probes (G39, G39.3), which leave Z unknown. Anything else (arcs, homing, probing, coordinate
-# resets) is refused there rather than guessed.
-TOOLPATH_GCODES = {"G0", "G1", "G4", "G21", "G90", "G91", "G92", "G39", "G39.3", "G392"}
+# clump and head-wrap probes (G39, G39.3), which leave Z unknown, and the XY plane select (G17) before Bambu Studio's
+# spiral lift (see _spiral_lift_problem). Anything else (other arcs, homing, probing, coordinate resets) is refused
+# there rather than guessed.
+TOOLPATH_GCODES = {"G0", "G1", "G4", "G17", "G21", "G90", "G91", "G92", "G39", "G39.3", "G392"}
 # G-codes that move an axis without saying where it ends up.
 UNKNOWN_AFTER = {"G28": "XYZ", "G29": "XYZ", "G29.2": "", "G380": "Z", "G39": "Z", "G39.3": "Z", "G39.4": "Z"}
 
@@ -206,6 +208,24 @@ class Motion:
             return op, words, target, delta
         return op, words, None, None
 
+def _spiral_lift_problem(words, target, envelope):
+    """Why a G2/G3 is not Bambu Studio's spiral lift, or None when it is one that stays inside the envelope.
+
+    Bambu Studio lifts Z with one full XY circle that returns to its start: "G17" then "G3 Z.. I.. J.. P1 F..", no X/Y,
+    no E (GCodeWriter::_spiral_travel_to_z; always used for its last retraction). Only that shape is accepted, from a
+    known XY position, and the whole circle (centre start + (I, J), radius |(I, J)|) must stay inside the envelope.
+    """
+    if any(a in words for a in "XYE") or words.get("P") != 1 or not ({"I", "J"} & set(words)):
+        return "only Bambu Studio's full-circle spiral lift (Z, I/J, P1, no X/Y/E) is accepted"
+    if target["X"] is None or target["Y"] is None:
+        return "spiral lift from an unknown position"
+    i, j = words.get("I", 0.0), words.get("J", 0.0)
+    cx, cy, r = target["X"] + i, target["Y"] + j, math.hypot(i, j)
+    if not (envelope[0] <= cx - r and cx + r <= envelope[2] and envelope[1] <= cy - r and cy + r <= envelope[3]):
+        return f"spiral lift circle (centre X{cx:g} Y{cy:g}, radius {r:g}) leaves the machine envelope"
+    return None
+
+
 def toolpath_motion_problems(text, bed, envelope, height=None, z_headroom=1.0):
     """Motion checks for G-code whose vendor start/end G-code parks the head off the bed (Bambu wiper, purge lane).
 
@@ -213,7 +233,8 @@ def toolpath_motion_problems(text, bed, envelope, height=None, z_headroom=1.0):
     stay inside envelope (xmin, ymin, xmax, ymax). In the toolpath (see split_toolpath) every move must have a known
     start for each axis it moves relatively, stay inside the envelope, keep Z between 0 and height + z_headroom,
     and every possibly extruding move must be at a known position on the bed at 0 < Z <= height. An E move whose
-    extruder mode is unknown counts as extruding. Arcs, homing, probing and XYZ coordinate resets are refused there.
+    extruder mode is unknown counts as extruding. Arcs (except Bambu Studio's bounded, non-extruding spiral lift),
+    homing, probing and XYZ coordinate resets are refused there.
     """
     split = split_toolpath(text)
     if split is None:
@@ -233,7 +254,12 @@ def toolpath_motion_problems(text, bed, envelope, height=None, z_headroom=1.0):
             where = f"{part} line {number}: {line.split(';', 1)[0].strip()[:60]}"
             if op is None:
                 continue
-            if part == "toolpath" and op.startswith("G") and op not in TOOLPATH_GCODES:
+            if part == "toolpath" and op in ("G2", "G3"):
+                reason = _spiral_lift_problem(words, target, envelope)
+                if reason:
+                    problems.append(f"Unsupported command in the toolpath ({where}): {reason}.")
+                    continue
+            elif part == "toolpath" and op.startswith("G") and op not in TOOLPATH_GCODES:
                 problems.append(f"Unsupported command in the toolpath ({where}).")
                 continue
             if part == "toolpath" and op == "G92" and any(a in words for a in "XYZ"):

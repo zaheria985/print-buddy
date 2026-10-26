@@ -443,6 +443,26 @@ def test_supported_toolpath_motion_passes(lines):
     assert problems(a1_gcode(body_with(lines))) == []
 
 
+def test_bambu_studio_spiral_lift_passes():
+    """Bambu Studio's last retraction always lifts with one full circle: G17, then G3 Z.. I.. J.. P1, no X/Y/E."""
+    assert problems(a1_gcode(body_with("G1 X120 Y120 E.8\nG17\nG3 Z.6 I1.217 J0 P1  F42000\n"))) == []
+
+
+@pytest.mark.parametrize("arc, message", [
+    ("G3 Z.6 I1.217 J0 P1 F42000", "unknown position"),                       # no known XY before the lift
+    ("G3 X110 Z.6 I1.217 J0 P1", "only Bambu Studio's full-circle spiral lift"),  # moves XY
+    ("G3 Z.6 I1.217 J0 P1 E1", "only Bambu Studio's full-circle spiral lift"),    # extrudes
+    ("G3 Z.6 I1.217 J0 P2", "only Bambu Studio's full-circle spiral lift"),       # more than one turn
+    ("G3 Z.6 P1", "only Bambu Studio's full-circle spiral lift"),                 # no centre
+    ("G2 Z.6 I40 J0 P1", "leaves the machine envelope"),                          # circle reaches X 300
+])
+def test_other_arcs_and_unsafe_spiral_lifts_are_refused(arc, message):
+    lines = "G17\n" + arc + "\n"
+    body = ("G1 Z.2 F720\n" + lines) if "unknown position" in message else body_with("G1 X260 Y120\n" + lines)
+    found = problems(a1_gcode(body))
+    assert any(message in p for p in found), found
+
+
 @pytest.mark.parametrize("body, message", [
     ("G91\nG1 X5\nG90\n", "unknown position"),                                  # relative before any position
     ("G1 X10 Y10 E1\n", "Extrusion at an unknown position"),                    # Z never set
