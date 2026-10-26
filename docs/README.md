@@ -9,6 +9,7 @@
 - [Telegram bot setup](TELEGRAM-BOT-SETUP.md): run the standalone bot on Telegram instead of Discord (#164); a pure bot with no LLM, long polling, inline-keyboard prompts.
 - [Hermes installation](INSTALL.md): profile installation, private overlays and listener setup.
 - [Docker](DOCKER.md): container configuration, persistent storage and service lifecycle. Follow the guide for the checked-out revision; do not assume a draft packaging PR is available.
+- [From the image to a first A1 print](BAMBU-A1-DOCKER.md): the Docker image on a Bambu Lab A1, step by step (#274): Compose overrides, A1 templates from the bundled OrcaSlicer, the hand-written hardware record, MakerWorld token, Discord, the LAN print opt-in and the fixes still pending. Verified on an A1 on 26 Oct 2026.
 
 Do not run both Discord modes with the same token. Installing, enabling services and contacting a printer are separate actions from offline model analysis.
 

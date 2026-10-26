@@ -2,6 +2,8 @@
 
 [Documentation home](README.md) · [Printer profiles](PRINTER-PROFILES.md)
 
+Running the Docker image on an A1? Follow [From the image to a first A1 print](BAMBU-A1-DOCKER.md) (#274), the step-by-step walkthrough verified on an A1 on 26 Oct 2026, with the workarounds still needed today.
+
 Select the A1 with `printer.model: bambulab.a1`. Print Buddy slices for the A1, checks fit and G-code, and can package the result. It connects to the printer only when you configure LAN status (see [LAN status](#lan-status-read-only-opt-in)), and it uploads or starts a print only under the further opt-in described in [Printing over LAN](#printing-over-lan-opt-in). Nothing here has been tested on an A1 — not the slicing path, and not the LAN path.
 
 Select the P1S with `printer.model: bambulab.p1s`. Like every Bambu Lab printer it slices with Bambu Studio by default (`printer.slicer: orca` opts out). It works the same way, and has not been tested on a P1S either. Its differences: OrcaSlicer's P1S profile slices to 250 mm high (Bambu lists 256 mm), an 18 × 28 mm area at the front left of the bed is kept clear, and the vendor start and end moves use the front purge lane up to Y = 265. The AMS is not used; P1S jobs are single color. Generate its profiles with `--printer p1s`.
