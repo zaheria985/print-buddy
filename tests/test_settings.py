@@ -344,6 +344,53 @@ class RuntimeSettingsTests(unittest.TestCase):
             with self.subTest(env=env), self.assertRaisesRegex(settings.SettingsError, message):
                 settings.load(local=False, environ=env)
 
+    def test_delivery_methods_env_list_is_parsed_and_validated(self):
+        """PRINT_BUDDY__DELIVERY__METHODS (#270): comma- or space-separated, checked like the YAML list."""
+        a1 = {"PRINT_BUDDY__PRINTER__MODEL": "bambulab.a1"}
+        for raw in ("discord,bambu_handoff,printer", "discord bambu_handoff printer", " printer , discord,  bambu_handoff "):
+            with self.subTest(raw=raw):
+                data = settings.load(local=False, environ={**a1, "PRINT_BUDDY__DELIVERY__METHODS": raw})
+                methods = data["delivery"]["methods"]
+                self.assertIsInstance(methods, list)
+                self.assertTrue(all(type(m) is str for m in methods))
+                # Vendor order, like the YAML value: the post-slice buttons follow it.
+                self.assertEqual(methods, ["printer", "discord", "bambu_handoff"])
+        # The .env.example line itself loads for the printer it is written for.
+        example = next(line.split("=", 1)[1] for line in (settings.ROOT / ".env.example").read_text().splitlines()
+                       if line.startswith("# PRINT_BUDDY__DELIVERY__METHODS="))
+        data = settings.load(local=False, environ={**a1, "PRINT_BUDDY__DELIVERY__METHODS": example})
+        self.assertIn("printer", data["delivery"]["methods"])
+        # A value the Bambu vendor does not offer is refused, naming the key, exactly like YAML.
+        for raw in ("discord,sd_card", "printer,Discord"):
+            with self.subTest(raw=raw), self.assertRaisesRegex(settings.SettingsError, r"\[delivery\] methods .* not offered"):
+                settings.load(local=False, environ={**a1, "PRINT_BUDDY__DELIVERY__METHODS": raw})
+        # A list of only separators is an empty list, refused like `methods: []` in YAML.
+        with self.assertRaisesRegex(settings.SettingsError, r"\[delivery\] methods must be a non-empty list"):
+            settings.load(local=False, environ={**a1, "PRINT_BUDDY__DELIVERY__METHODS": ","})
+        # The Flashforge vendor offers no Bambu handoff: the same check applies to every vendor.
+        with self.assertRaisesRegex(settings.SettingsError, r"\[delivery\] methods \['bambu_handoff'\] are not offered"):
+            settings.load(local=False, environ={"PRINT_BUDDY__DELIVERY__METHODS": "bambu_handoff"})
+
+    def test_delivery_methods_env_wins_over_yaml_and_yaml_stands_when_env_unset(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        local = Path(tmp.name) / "local.yaml"
+        local.write_text("printer:\n  model: bambulab.a1\ndelivery:\n  methods: [discord]\n")
+        self.assertEqual(settings.load(local=local, environ={})["delivery"]["methods"], ["discord"])
+        # An empty value leaves the file value alone, like every other Docker feature variable left blank.
+        self.assertEqual(settings.load(local=local, environ={"PRINT_BUDDY__DELIVERY__METHODS": ""})["delivery"]["methods"],
+                         ["discord"])
+        data = settings.load(local=local, environ={"PRINT_BUDDY__DELIVERY__METHODS": "discord,printer"})
+        self.assertEqual(data["delivery"]["methods"], ["printer", "discord"])
+        # The vendor default stands when neither the file nor the environment sets it: `printer` is never a default.
+        self.assertEqual(settings.load(local=False, environ={"PRINT_BUDDY__PRINTER__MODEL": "bambulab.a1"})["delivery"]["methods"],
+                         ["discord", "bambu_handoff"])
+
+    def test_other_lists_stay_file_only(self):
+        for env in ({"PRINT_BUDDY__ORCA__COMMAND": "orca-slicer"}, {"PRINT_BUDDY__PRINTER__BED_MM": "220,220"}):
+            with self.subTest(env=env), self.assertRaisesRegex(settings.SettingsError, "cannot come from the environment"):
+                settings.load(local=False, environ=env)
+
     def test_moonraker_url_derives_websocket_and_camera(self):
         data = settings.load(local=False, environ={"MOONRAKER_URL": "http://ad5x.lan:7125/"})
         self.assertEqual(data["services"]["moonraker_ws_url"], "ws://ad5x.lan:7125/websocket")

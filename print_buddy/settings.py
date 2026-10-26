@@ -5,7 +5,8 @@ Load order, later wins key by key:
      printer model's own (print_buddy/printers/<vendor>/<printer>.py)
   2. config/home.yaml, falling back to config/home.toml
   3. $PRINT_BUDDY_CONFIG, else config/local.yaml, falling back to config/local.toml
-  4. Environment: PRINT_BUDDY__SECTION__KEY, or a legacy name from LEGACY_ENV
+  4. Environment: PRINT_BUDDY__SECTION__KEY, or a legacy name from LEGACY_ENV. Lists stay file-only
+     except ENV_LISTS, which take a comma- or space-separated value (#270).
 
 The model comes from environment, selected local configuration, then home configuration. [printer] model
 is the full "vendor.printer" key, as every existing config has it, or the printer part with [printer]
@@ -89,6 +90,11 @@ OPTIONAL_KEYS = {("printer", "nozzle_type"): str, ("visual_watch", "enabled"): b
                  ("bambu", "lan_access_code_env"): str,
                  ("slicer", "flash_studio_path"): str,
                  ("flashforge_stock", "host"): str}
+# List settings that may also come from the environment, as a comma- or space-separated value
+# (PRINT_BUDDY__DELIVERY__METHODS=discord,bambu_handoff,printer). Every other list or table is file
+# only. [delivery] methods is here so a Docker operator can opt into the Bambu LAN print button without
+# replacing the image's docker.yaml (#270); the value is validated exactly like the YAML list.
+ENV_LISTS = {("delivery", "methods")}
 DEFAULT_MATERIAL_TEMPS = {
     "PLA": {"nozzle": 210, "bed": 60}, "PETG": {"nozzle": 240, "bed": 85},
     "ABS": {"nozzle": 245, "bed": 100}, "ASA": {"nozzle": 260, "bed": 105},
@@ -183,6 +189,11 @@ def _coerce(expected, raw, name):
     raise SettingsError(f"${name}: [list] settings cannot come from the environment")
 
 
+def _split_list(raw):
+    """A comma- or space-separated environment value as a list of strings; empty entries are dropped."""
+    return [part for part in re.split(r"[\s,]+", raw.strip()) if part]
+
+
 def _from_env(home, environ):
     out = {}
     for name, raw in environ.items():
@@ -194,6 +205,12 @@ def _from_env(home, environ):
         elif name in LEGACY_ENV:
             section, key = LEGACY_ENV[name]
         else:
+            continue
+        if (section, key) in ENV_LISTS:
+            # An empty value changes nothing, like every other Docker feature variable left blank;
+            # the list itself is checked by validate() (for [delivery] methods: _validate_vendor_choices).
+            if raw.strip():
+                out.setdefault(section, {})[key] = _split_list(raw)
             continue
         if key not in home.get(section, {}):
             if (section, key) in OPTIONAL_KEYS:

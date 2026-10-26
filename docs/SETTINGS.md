@@ -3,7 +3,7 @@
 Every user-adjustable setting, its YAML key, its environment variable and its value in the Docker configuration (`config/docker.yaml` over `config/home.yaml` and the printer model). `tests/test_docker_release.py` derives the inventory from the settings schema and fails when a setting lacks a row here or an `.env.example` line, or when a documented name is not a real setting.
 
 * **YAML**: put keys in a file and select it with `PRINT_BUDDY_CONFIG`. In Docker, mount the file and point `PRINT_BUDDY_CONFIG` at its container path.
-* **Environment**: `PRINT_BUDDY__SECTION__KEY=value` overrides any file. Booleans accept `true/false`, `1/0`, `yes/no`, `on/off`. Integer settings need integer spelling (`12`, not `12.0`). Rows marked *file only* are lists or tables and can only come from YAML or legacy TOML.
+* **Environment**: `PRINT_BUDDY__SECTION__KEY=value` overrides any file. Booleans accept `true/false`, `1/0`, `yes/no`, `on/off`. Integer settings need integer spelling (`12`, not `12.0`). Rows marked *file only* are lists or tables and can only come from YAML or legacy TOML; the one list exception is `delivery.methods`, which also accepts a comma- or space-separated environment value (`PRINT_BUDDY__DELIVERY__METHODS=discord,bambu_handoff,printer`, #270).
 * **Precedence**, later wins: vendor and printer model defaults (*model*), `config/home.yaml`, the selected config file, environment. Settings are read once at start, so restart the service after a change.
 * A typo or invalid value stops startup and names the setting. YAML holds no secrets; see [Secrets](#secrets).
 
@@ -35,7 +35,7 @@ Schema, validation limits and TOML migration: [CONFIGURATION-YAML.md](CONFIGURAT
 | `printer.nozzle_type` | `PRINT_BUDDY__PRINTER__NOZZLE_TYPE` | unset | Optional nozzle material, limited to the model's supported types |
 | `orca.templates` | `PRINT_BUDDY__ORCA__TEMPLATES` | the model's folder *model* | Folder with the Orca machine, process and filament JSON |
 | `orca.command` | file only | `["/usr/local/bin/orca-slicer"]` | How to start the OrcaSlicer CLI; `PRINT_BUDDY_ORCA_CHANNEL` selects stable (default) or alpha; both binaries exist only when `WITH_ORCA=true` |
-| `delivery.methods` | file only | `["printer"]` *model* | Post-slice options offered, from the vendor profile (for example `printer`) |
+| `delivery.methods` | `PRINT_BUDDY__DELIVERY__METHODS` | `["printer"]` *model* | Post-slice options offered, from the vendor profile (for example `printer`); comma- or space-separated in the environment, an empty value keeps the file value |
 | `bambu.command` | file only | `["/usr/bin/bambu-studio"]` | Bambu Studio CLI: the default slicer for Bambu Lab printers, Orca's one-shot fallback elsewhere; exists only in a `WITH_BAMBU=true` image |
 | `bambu.lan_host` | `PRINT_BUDDY__BAMBU__LAN_HOST` | `""` | Bambu Lab printer LAN address for read-only status (#187); must be set together with `lan_serial`; empty disables LAN status |
 | `bambu.lan_serial` | `PRINT_BUDDY__BAMBU__LAN_SERIAL` | `""` | The Bambu Lab printer's serial number (stored upper case); used in the MQTT topics, not as a credential |

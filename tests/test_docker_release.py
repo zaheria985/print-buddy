@@ -87,7 +87,8 @@ class SettingsParityTests(unittest.TestCase):
                     self.assertTrue(any(name.startswith(f"{section}.<") for name in self.rows), section)
                     continue
                 self.assertIn(f"{section}.{key}", self.rows)
-                expected = f"`{env_name(section, key)}`" if is_scalar(value) else "file only"
+                from_env = is_scalar(value) or (section, key) in settings.ENV_LISTS
+                expected = f"`{env_name(section, key)}`" if from_env else "file only"
                 self.assertEqual(self.rows[f"{section}.{key}"].strip(), expected)
 
     def test_every_reference_row_is_a_real_setting(self):
@@ -118,7 +119,10 @@ class SettingsParityTests(unittest.TestCase):
         environ = {}
         for line in ENV_EXAMPLE.splitlines():
             match = re.match(r"^#? ?(PRINT_BUDDY__[A-Z0-9_]+)=(.+)$", line)
-            if match and "example" not in match.group(2) and match.group(1) != "PRINT_BUDDY__PRINTER__MODEL":
+            # The model line and the delivery list are per-printer: the delivery example is written for
+            # bambulab.a1 (tests/test_settings.py loads it there), docker.yaml selects flashforge.ad5x.
+            if match and "example" not in match.group(2) and match.group(1) not in ("PRINT_BUDDY__PRINTER__MODEL",
+                                                                                 "PRINT_BUDDY__DELIVERY__METHODS"):
                 environ[match.group(1)] = match.group(2)
         self.assertGreater(len(environ), 40)
         data = settings.load(local=ROOT / "config" / "docker.yaml", environ=environ)
