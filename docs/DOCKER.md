@@ -40,6 +40,20 @@ Sensitivity also sets the periodic check interval (30, 20, 15, 10 or 7.5 minutes
 3. Leave the token empty for staging. At separately authorized live cutover configure token, chat ID and allowed user IDs. Stop previous consumers before enabling the replacement. Live startup never authorizes heating, movement or printing.
 4. Use `PRINT_BUDDY__SECTION__KEY` scalar overrides from [SETTINGS.md](SETTINGS.md), or mount YAML/TOML and set `PRINT_BUDDY_CONFIG`. Never bake secrets into images or mount host source over `/app`.
 5. One Compose service, `combined`, uses 2 CPUs, 2 GiB RAM, 256 PIDs and 256 MiB shared memory by default. Real slicing may require more RAM. Capabilities are dropped and logs rotate.
+6. MakerWorld links only: provide the account token file and keep it on the host; see [MakerWorld account token](#makerworld-account-token). Printables links and uploads need no token.
+
+### MakerWorld account token
+
+The image sets `HOME=/data`, so Print Buddy reads the MakerWorld token from `/data/.config/bambu/token`. How to get and renew the token is in the [project reference](PROJECT-REFERENCE.md#makerworld-account-token). `/data/.config` is not one of the persistent paths above, so a token written inside a running container is lost when the container is recreated. Keep it on the host and bind-mount it with a local Compose override, for example a `docker-compose.override.yml` next to `docker-compose.yml`:
+
+```yaml
+services:
+  combined:
+    volumes:
+      - ${PRINT_BUDDY_DATA:-./data}/dot-config:/data/.config
+```
+
+On the host, put only the token in `dot-config/bambu/token` under `PRINT_BUDDY_DATA`. Make `dot-config` and everything in it owned by UID/GID 1000:1000, with mode 0700 on `bambu` and 0600 on `token`, then recreate the container. Mount the whole `/data/.config` directory, not just `bambu`: the image does not create `/data/.config`, and a mount point Docker has to create itself is owned by root, which leaves the rest of `~/.config` unwritable for the container user. Anything else the container keeps under `~/.config` persists in that host directory too. On Unraid, add a Path mapping from a host folder such as `/mnt/user/appdata/print-buddy/dot-config` to container path `/data/.config`; the template does not ship one.
 
 ## Unraid DockerMan
 

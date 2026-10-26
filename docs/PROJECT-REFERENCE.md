@@ -41,7 +41,7 @@ A bed-clear approval starts one print. Starting the same G-code again needs a ne
 ## Features
 
 **Intake and slicing**
-* MakerWorld and Printables links, or uploaded 3MF and STL files.
+* MakerWorld and Printables links, or uploaded 3MF and STL files. MakerWorld links need an [account token](#makerworld-account-token); Printables links and uploads do not.
 * Print time and grams from the model page in the first reply.
 * Multi plate models merged onto one bed when they fit; plates that would run longer than `layout.max_merged_hours` stay separate. Merging first tries the established rectangle packing; when that fails and at least one part is genuinely non-rectangular, the merge planner retries with the parts' actual convex hulls (translation only, at their authored orientation, with the same spacing measured hull-to-hull instead of rectangle-to-rectangle), so multi-plate sources that split only because of rectangular over-estimation — two diagonal or triangular parts, for example — can still merge onto one plate. Under that hull fallback rectangle-only sources keep exactly their previous merge verdicts and placements, and a hull placement that cannot be found within a bounded search falls back to the previous split outcome. When rectangle and hull packing both fail, the merge planner makes one more attempt with per-object yaw: a part that fits the usable bed only when turned in the bed plane is packed by its hull rotated to the same recorded yaw the full-size split evaluation chooses for such a part (recorded as `yaw_by_object` in the merge plan), while parts that fit as authored keep their authored orientation, so a source that split only because one part needed a turn can now merge. Slicing realizes each recorded turn through the exporters' per-object fit channels, composed with the plan's recorded shifts (a turned part's shift is measured from its rotated bounds), and proves the merged output landed at each turned part's rotated bounds plus its shift before accepting it; a merge plan that records a turn for an unknown object, a non-finite or out-of-range angle, or a turn without the shifts that realize it is refused rather than sliced as authored. A part that fits the bed at no checked yaw still blocks the merge, eligibility matches the hull fallback (single-build-item parts only), and every merge verdict that succeeds without a turn is unchanged.
 * Oversized models split across plates, tracked as one plan.
@@ -118,6 +118,20 @@ Upgrading from `[printer] family`: replace it in `config/local.toml` with `model
 | 5 | 5.0 | 2 layers | 7.5 min | no |
 
 Empty bed, spaghetti, detached part, uncertain, and vision failure alerts fire at every level.
+
+### MakerWorld account token
+
+MakerWorld links need a MakerWorld (Bambu Lab) account token. It is a file, not a setting or environment variable: Print Buddy reads `~/.config/bambu/token` in the home directory of the account that runs it (in Docker, `/data/.config/bambu/token`; see [Docker](DOCKER.md#makerworld-account-token)) and sends it as an `Authorization: Bearer` header on the MakerWorld model lookup and on the file download. Printables links and uploaded files need no token.
+
+To get the token, sign in at makerworld.com in a browser and copy the value of the site cookie named `token` from the browser's developer tools. Store it as the only content of the file, readable only by that account, and never commit or share it:
+
+```bash
+mkdir -p ~/.config/bambu && chmod 700 ~/.config/bambu
+(umask 077 && cat > ~/.config/bambu/token)   # paste the cookie value, press Enter, then Ctrl-D
+chmod 600 ~/.config/bambu/token
+```
+
+Without the file, MakerWorld intake stops before the model summary with a message naming the file; an empty file stops it too. Print Buddy does not check the token when it reads it. Tokens expire: when MakerWorld downloads start failing, sign in again and replace the file. Observed by the reporter on 25 Oct 2026 ([#262](https://github.com/catduckgnaf/print-buddy/issues/262)): with an invalid token, the MakerWorld model lookup still answered and the summary was posted, and the download was then refused with HTTP 403 ("Please log in to download models."). A wrong or expired token can therefore show up only at download time, after the model summary.
 
 ### All settings
 

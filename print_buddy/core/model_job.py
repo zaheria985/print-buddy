@@ -53,7 +53,12 @@ def download(url, target):
 
 
 def maker_headers():
-    token=(Path.home()/".config/bambu/token").read_text().strip()
+    path=Path.home()/".config/bambu/token"
+    try:
+        token=path.read_text().strip()
+    except FileNotFoundError:
+        raise RuntimeError(f"MakerWorld links need an account token in {path}; "
+                           "see docs/PROJECT-REFERENCE.md (MakerWorld account token)") from None
     if not token: raise RuntimeError("MakerWorld token empty")
     return {"Authorization":f"Bearer {token}", "Origin":"https://makerworld.com",
             "Referer":"https://makerworld.com/", "x-bbl-app-source":"makerworld"}
