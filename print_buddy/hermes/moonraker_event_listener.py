@@ -86,6 +86,37 @@ def _telegram_chat_id():
     return str(_config.cfg()["telegram"].get("chat_id") or "")
 
 
+def _matrix_standalone():
+    return _config.standalone() and _platform_name() == "matrix"
+
+
+def _buttonless_standalone():
+    """The platform name when standalone posts have no Discord buttons, else None.
+
+    Telegram (#164 stage 2) and Matrix (stage 3) have no Discord-shaped
+    button posts: alerts go out as plain text and the operator answers
+    with the typed commands the text names.
+    """
+    if _telegram_standalone():
+        return "telegram"
+    if _matrix_standalone():
+        return "matrix"
+    return None
+
+
+def _matrix_token():
+    """The Matrix access token, from the variable [matrix] access_token_env names."""
+    return _profile_env_value(str(_config.cfg()["matrix"].get("access_token_env") or "MATRIX_ACCESS_TOKEN"))
+
+
+def _matrix_homeserver():
+    return str(_config.cfg()["matrix"].get("homeserver_url") or "")
+
+
+def _matrix_room_id():
+    return str(_config.cfg()["matrix"].get("room_id") or "")
+
+
 def post(message):
     """Deliver physical print lifecycle text to the print chat only, with no agent."""
     if _config.standalone():
@@ -110,7 +141,8 @@ def _post_rest(message):
     """Standalone mode: the configured platform's REST sender with its bot token.
 
     Works with no gateway connected. Discord is the original path; Telegram
-    (#164 stage 2) posts text and MEDIA files through telegram_rest.
+    (#164 stage 2) posts text and MEDIA files through telegram_rest, Matrix
+    (stage 3) through matrix_rest.
     """
     if _platform_name() == "telegram":
         from print_buddy.bot import telegram_rest
@@ -120,6 +152,16 @@ def _post_rest(message):
             return False
         ok, detail = telegram_rest.send(_telegram_token(), chat, message)
         log(f"post rest target=telegram:{chat} ok={ok} {message.splitlines()[0][:120] if message else ''!r}"
+            f"{'' if ok else ' ' + str(detail)[:200]}")
+        return ok
+    if _platform_name() == "matrix":
+        from print_buddy.bot import matrix_rest
+        room = _matrix_room_id()
+        if not room:
+            log("post skipped: matrix.room_id is not configured")
+            return False
+        ok, detail = matrix_rest.send(_matrix_homeserver(), _matrix_token(), room, message)
+        log(f"post rest target=matrix:{room} ok={ok} {message.splitlines()[0][:120] if message else ''!r}"
             f"{'' if ok else ' ' + str(detail)[:200]}")
         return ok
     from print_buddy.bot import rest
@@ -132,11 +174,11 @@ def _post_rest(message):
 def post_alert(message, kind, filename):
     """Post with Resume/Cancel buttons; fall back to plain text if Discord refuses.
 
-    On Telegram (#164 stage 2) the Discord-shaped button posts do not
-    apply: the alert goes out as plain text and the operator answers with
-    the typed commands the text names.
+    On Telegram and Matrix (#164 stages 2-3) the Discord-shaped button
+    posts do not apply: the alert goes out as plain text and the operator
+    answers with the typed commands the text names.
     """
-    if _telegram_standalone():
+    if _buttonless_standalone():
         return post(message)
     try:
         from . import print_alert_buttons as pab
@@ -152,7 +194,7 @@ def post_alert(message, kind, filename):
 
 def post_plate_picker(plan_id):
     """Post the interactive remaining-plate picker; name the command only when it cannot be delivered."""
-    if _telegram_standalone():
+    if _buttonless_standalone():
         return post(f"To start the next plate, type `/print-next {plan_id}`.")
     try:
         from . import print_alert_buttons as pab
@@ -175,7 +217,7 @@ def post_plate_picker(plan_id):
 
 def post_insertion_confirmation(slot):
     """Offer an answer-only IFS insertion UI, then retain the command-text fallback."""
-    if _telegram_standalone():
+    if _buttonless_standalone():
         return post(insertion_prompt(slot))
     try:
         from . import print_alert_buttons as pab
@@ -192,9 +234,9 @@ def post_insertion_confirmation(slot):
 
 def post_spool_question(record, nag=False):
     """Post once or refresh a paused-spool question without stacking nag messages."""
-    if _telegram_standalone():
+    if _buttonless_standalone():
         if nag:  # no Discord message to refresh; never stack a second question
-            log("spool question nag skipped on telegram: no message refresh")
+            log(f"spool question nag skipped on {_buttonless_standalone()}: no message refresh")
             return False
         return post(spool_question_text(record))
     try:
@@ -267,7 +309,7 @@ def screen_cancel_reboot(filename, *, status_reader=None, rebooter=None, clearer
         say(f"Screen cancel on {label}. Force restarting the printer now, about two minutes.")
         ok, msg = (rebooter or print_control.force_reboot)()
     log(f"screen cancel reboot ok={ok}: {msg}")
-    if ok and clearer is None and rebooter is None and not _telegram_standalone():  # real run only; tests inject fakes
+    if ok and clearer is None and rebooter is None and not _buttonless_standalone():  # real run only; tests inject fakes
         with contextlib.suppress(Exception):
             pab.retire_alerts(_bot_token(), filename, "Cleared after the screen cancel; nothing to do.")
     say(msg)
@@ -1158,7 +1200,7 @@ def _visual_alert(filename, image, reason):
     path = target / f"{int(time.time())}-{Path(filename or 'print').stem}.jpg"
     path.write_bytes(image)
     text = f"Print camera check: {clean(filename)}\n{reason}"
-    if _telegram_standalone():
+    if _buttonless_standalone():
         post(text + f"\n{path}\nMEDIA:{path}")
         return path
     try:

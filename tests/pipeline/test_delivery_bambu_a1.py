@@ -15,6 +15,7 @@ from printers import a1_fixture
 from printers.test_bambulab_a1 import A1 as A1_KEY, a1_gcode, ad5x_gcode, adapter_for
 from .helpers import external
 from .test_delivery import _delivery_menu, config_for, use_config
+from .test_plate_thumbnail import box_stl
 from .test_prepared_intake import env, run_flow  # noqa: F401  (pytest fixture)
 
 print_next = external("print_next")
@@ -43,6 +44,7 @@ def _a1_slice(monkeypatch, text):
         out = real_slice(job_path, **kw)
         for gcode in out:
             Path(gcode).write_text(text)
+            box_stl(Path(gcode).parent / "geometry.stl", origin=(118, 123, 0))  # what a real slice leaves beside it
         data = json.loads(Path(job_path).read_text())
         model_job.write_job(Path(job_path).parent, {**data, "printer_model": A1})
         return out
@@ -63,6 +65,8 @@ def test_a1_offers_no_print_and_packages_through_its_guard(env, monkeypatch, tmp
     package = next(m for m in adapter.sent if "MEDIA:" in m).split("MEDIA:")[1].strip()
     with zipfile.ZipFile(package) as archive:
         assert archive.read("Metadata/plate_1.gcode").decode() == a1_gcode()
+        # #275: the previews the A1 screen and the Bambu apps read, rendered from the sliced geometry.
+        assert {"Metadata/plate_1.png", "Metadata/plate_1_small.png"} <= set(archive.namelist())
     assert env.starts == [] and receipt["status"] == "SLICED_NOT_STARTED" and "bed_clear_approval" not in receipt
     assert [d["method"] for d in receipt["deliveries"]] == ["bambu_handoff", "discord"]
 

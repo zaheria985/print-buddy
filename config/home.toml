@@ -111,13 +111,32 @@ approval_user_id = ""
 # Largest file the bot uploads: the Telegram Bot API cloud limit.
 upload_max_bytes = 50000000
 
+[matrix]
+# Standalone bot only, when [bot] platform is matrix (#164). The access token
+# itself never goes in a file here; access_token_env names the environment
+# variable holding it. The room must be unencrypted.
+homeserver_url = ""
+access_token_env = "MATRIX_ACCESS_TOKEN"
+# Room ID of the print room (starts with "!"), from the room's settings.
+room_id = ""
+# Matrix user IDs allowed to use the bot, full @user:server form, separated
+# by commas or spaces. approval_user_id is always allowed.
+allowed_user_ids = ""
+approval_user_id = ""
+# The bot's own Matrix user ID (@user:server). Empty: asked from the
+# homeserver (whoami) at startup.
+bot_user_id = ""
+# Largest file the bot uploads; lowered to the homeserver's media limit
+# when the server reports a smaller one.
+upload_max_bytes = 50000000
+
 [bot]
 # hermes: the Hermes gateway runs the print-feedback plugin (the default).
 # standalone: python3 -m print_buddy.bot talks to Discord directly. No Hermes, no LLM needed.
 # Use one mode per bot token.
 mode = "hermes"
 # Standalone bot only: the chat platform ([bot] platform, #164). discord is the default;
-# telegram is implemented (#164 stage 2); matrix lands in a later stage of #164.
+# telegram (#164 stage 2) and matrix (stage 3) are implemented.
 platform = "discord"
 # Standalone bot: serve GET /healthz on this port. 0 turns the HTTP check off; the health file still works.
 health_port = 0

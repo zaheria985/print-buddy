@@ -321,7 +321,7 @@ def preview_sentence(job, row):
             plates = len((row or {}).get('plates') or [])
             text += (f" Model page estimate: about {mj.human_dur(site[0])}"
                      f" and {round(site[1])} g of filament{f' over {plates} plates' if plates > 1 else ''}."
-                     ' The AD5X figure after slicing will differ somewhat.')
+                     f' The {printers.current().display_name} figure after slicing will differ somewhat.')
         else:
             text += ' The model page gives no time or filament estimate; I will report both after slicing.'
     return text
@@ -691,19 +691,33 @@ async def _delivery_menu(adapter, source, key, metadata, timeout, question, enab
     """
     can_print = delivery.PRINTER in enabled
     offered = [m for m in enabled if m != delivery.PRINTER]
+    sizes = {}  # deflate measurements for this slice, taken once (#272)
+    shown = False
     while True:
         pending = [m for m in offered if not delivery.done(receipt, m)]
-        if not pending and not can_print:
+        buttons, note = list(pending), ''
+        if delivery.DISCORD in pending:
+            # Size what the send would attach before offering it (#272): a file over [discord]
+            # upload_max_bytes gets its size, the limit and its host path here, not a button that fails.
+            limit = delivery.upload_limit()
+            fit = await asyncio.to_thread(delivery.discord_candidates, gcodes, limit, cache=sizes)
+            note = delivery.oversize_message(fit, limit)
+            if not any(item.fits for item in fit):
+                buttons.remove(delivery.DISCORD)
+        if not buttons and not can_print:
+            if note and not shown:  # no menu to carry it: the sizes still reach the operator
+                await adapter.send(chat_id=source.chat_id, content=note, metadata=metadata)
             return 1
-        choices = (([print_next.START_LABEL] if can_print else []) + [delivery.LABELS[m] for m in pending]
+        shown = True
+        choices = (([print_next.START_LABEL] if can_print else []) + [delivery.LABELS[m] for m in buttons]
                    + [delivery.DONE_LABEL])
-        picked = await _ask(adapter, source, key, question, choices, timeout)
+        picked = await _ask(adapter, source, key, question + ('\n' + note if note else ''), choices, timeout)
         label = choices[picked]
         if label == print_next.START_LABEL:
             return 0
         if label == delivery.DONE_LABEL:
             return 1
-        method = pending[picked - (1 if can_print else 0)]
+        method = buttons[picked - (1 if can_print else 0)]
         await _deliver(adapter, source, metadata, method, receipt, jp, gcodes, pending)
         receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
         question = 'Anything else for this slice?' + (' Start uploads and prints it immediately.' if can_print else '')
@@ -720,9 +734,17 @@ async def _deliver(adapter, source, metadata, method, receipt, jp, gcodes, pendi
             packages = await asyncio.to_thread(delivery.bambu_handoff, job, artifacts)
             delivery.record(receipt, method, [{'source': p, 'sent': None, 'ok': True} for p in packages], True,
                             'packaged')
-            where = (" Use 'Send the files here' to download it." if delivery.DISCORD in pending
-                     else ' On the Print Buddy host: ' + ', '.join(str(p) for p in packages) + '.')
             names = ', '.join(p.name for p in packages)
+            where = ' On the Print Buddy host: ' + ', '.join(str(p) for p in packages) + '.'
+            if delivery.DISCORD in pending:
+                # The package now exists, so its size is exact: offer the download only when it fits (#272).
+                limit = delivery.upload_limit()
+                fit = delivery.discord_candidates(artifacts, limit)
+                fitting = sum(1 for f in fit if f.fits)
+                offer = ('' if not fitting else " Use 'Send the files here' to download it." if fitting == len(fit)
+                         else " Use 'Send the files here' to download the one(s) under the limit.")
+                note = delivery.oversize_message(fit, limit, for_handoff=True)
+                where = offer + (' ' + note if note else '')
             await say(f'Bambu package ready: {names}.{where}\n'
                       + delivery.handoff_note(delivery.current_model()))
             return
@@ -985,7 +1007,7 @@ async def prepare_link(event, adapter, state, root, timeout=None, reuse=None):
                                        metadata=metadata)
                     return {'action': 'skip', 'reason': 'inch-confirmed model exceeds printer volume'}
         selections = [mj.resolve_filament_selection(state, dict(label, slot=int(slot)))
-                      for slot, label in sorted(state.get('ifs_slots', {}).items())]
+                      for slot, label in sorted(mj.configured_slots(state).items())]
         labels = mj.build_slot_labels(selections)
         if not labels or len(labels) > IFS_SLOTS or len(set(labels)) != len(labels):
             raise ValueError('requires one to four distinct configured slots')

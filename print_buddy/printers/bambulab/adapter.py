@@ -11,6 +11,7 @@ ZMod/AD5X code and has no Moonraker or cloud client.
 """
 import json
 import os
+from pathlib import Path
 
 from ..base import MultiColorUnsupported, PrinterAdapter
 from . import guard, profiles
@@ -130,6 +131,27 @@ class BambuAdapter(PrinterAdapter):
         Raises profiles.ProfileError when they are missing, edited or not a checked OrcaSlicer version.
         """
         return profiles.require(self)
+
+    def filament_template(self, templates, material):
+        """The checked vendor filament profile for material (profiles.filament_template), or ProfileError.
+
+        In the verified generated folder the profile is re-verified. An [orca] templates override may carry its own
+        filaments/<MATERIAL>.json or a filament.json of that material; the guard still holds the output to the
+        verified profiles. A material with no profile is refused either way.
+        """
+        templates = Path(templates)
+        if templates.resolve() == self.pinned_templates_folder().resolve():
+            return profiles.filament_template(self, material, templates)
+        key = profiles.material_key(material)
+        own = templates / profiles.FILAMENTS / f"{key}.json"
+        if own.is_file():
+            return own
+        default = templates / "filament.json"
+        kind = profiles._first(json.loads(default.read_text()).get("filament_type"))
+        if profiles.material_key(kind) != key:
+            raise profiles.ProfileError(f"{self.label}: the [orca] templates folder {templates} has no {key} filament "
+                                        f"profile (its filament.json is {kind}). Nothing was sliced")
+        return default
 
     def gcode_problems(self, text, state=None):
         return guard.gcode_problems(text, self, state=state)

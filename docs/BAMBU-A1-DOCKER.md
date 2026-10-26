@@ -1,0 +1,245 @@
+# From the image to a first A1 print (Docker + Bambu Lab A1)
+
+[Documentation home](README.md) · [Docker](DOCKER.md) · [Bambu Lab printers](BAMBU-LAB.md)
+
+This page is the walkthrough asked for in [#274](https://github.com/catduckgnaf/print-buddy/issues/274): every step from a published image to a print running on a Bambu Lab A1 over the LAN, with nothing else on the path (no Hermes, no Moonraker, no Spoolman record, no Bambu Studio). Every step below was run on 26 Oct 2026 with the 2.1.3 image, an A1 in Developer Mode and OrcaSlicer 2.4.2 from the image. The commands and keys match the code on `main` at the time of writing.
+
+Some steps work around behaviour that is being fixed. Each such step names the issue; once the fix is released the workaround becomes unnecessary and this page should be updated. Read [Bambu Lab printers](BAMBU-LAB.md) first for what the Bambu path is and what it guards; this page only tells you what to type, in order.
+
+| Step | Workaround for | Status |
+|---|---|---|
+| 1 | Container restart-loops for a Bambu model: the stock supervisor starts the Moonraker listener, which exits when `services.moonraker_url` is empty | [#256](https://github.com/catduckgnaf/print-buddy/issues/256) (PR 259) |
+| 1, 4 | `/data/.config` (MakerWorld token, local settings) is not a declared volume | [#262](https://github.com/catduckgnaf/print-buddy/issues/262), [#270](https://github.com/catduckgnaf/print-buddy/issues/270) |
+| 3 | The hardware record must be written by hand; editing it invalidates prepared jobs | [#263](https://github.com/catduckgnaf/print-buddy/issues/263) |
+| 5 | Single-extruder slices fail the post-slice check | [#268](https://github.com/catduckgnaf/print-buddy/issues/268) |
+| 5 | A package over the Discord attachment limit is not delivered | [#272](https://github.com/catduckgnaf/print-buddy/issues/272) |
+| 6 | `delivery.methods` can only come from a mounted YAML that replaces `config/docker.yaml` | [#270](https://github.com/catduckgnaf/print-buddy/issues/270) |
+| 6 | The Discord Start button's idle check queries Moonraker only | [#269](https://github.com/catduckgnaf/print-buddy/issues/269) |
+| 6 | A started print can show as "submitted, awaiting confirmation" | [#271](https://github.com/catduckgnaf/print-buddy/issues/271) |
+| 6 | `/print-stop` cannot stop a Bambu print | [#276](https://github.com/catduckgnaf/print-buddy/issues/276) |
+| 6 | The handoff package has no preview thumbnails | [#275](https://github.com/catduckgnaf/print-buddy/issues/275) |
+| 7 | The summary wording says "AD5X" | [#273](https://github.com/catduckgnaf/print-buddy/issues/273) |
+
+## Before you start
+
+- A host with Docker and Compose, on the same LAN as the printer.
+- The A1 on the same network, reachable from the container on TCP ports 8883 (MQTT over TLS) and 990 (implicit FTPS). Both are what `print_buddy/printers/bambulab/client.py` uses; nothing else is opened.
+- A Discord bot token, the print channel ID and your user ID; see [Discord bot setup](DISCORD-BOT-SETUP.md).
+- A MakerWorld account if you want MakerWorld links. Printables links need no account.
+- The full image, not `-light`: light contains no OrcaSlicer, so it cannot slice (see [Docker](DOCKER.md#supported-platforms-and-variants-192)).
+
+Paths below assume the checked-out `docker-compose.yml`, a private `.env` beside it and `PRINT_BUDDY_DATA=./data`. Everything under the data directory must be writable by UID/GID 1000:1000, the container user.
+
+## 1. Compose: pin the image, add the sixth mount, replace the command
+
+**Why:** the stock service definition assumes a Moonraker printer and the bundled Spoolman; on a Bambu model the Moonraker listener exits at once (`services.moonraker_url is not configured`), the supervisor treats a child exit as fatal and Docker restarts the container forever ([#256](https://github.com/catduckgnaf/print-buddy/issues/256), fixed by PR 259 once it lands).
+
+1. Copy `.env.example` to `.env`. Set `PRINT_BUDDY_IMAGE` to the digest of the image you tested, not a tag; the digest is the first `RepoDigests` entry after a pull:
+
+   ```bash
+   docker pull ghcr.io/catduckgnaf/print-buddy:2.1.3
+   docker image inspect --format '{{index .RepoDigests 0}}' ghcr.io/catduckgnaf/print-buddy:2.1.3
+   ```
+
+   Put the printed `ghcr.io/catduckgnaf/print-buddy@sha256:...` value in `PRINT_BUDDY_IMAGE`.
+
+2. Create the data directories the five declared volumes map to, plus one more, `dot-config`, for `/data/.config`:
+
+   ```bash
+   mkdir -p data/hermes data/archive data/records data/cache data/spoolman data/dot-config
+   sudo chown -R 1000:1000 data
+   ```
+
+   `HOME` inside the image is `/data` (`Dockerfile`), so the MakerWorld token is read from `/data/.config/bambu/token` and the bot keeps a local settings file under `/data/.config` as well. That directory is not one of the five declared volumes, so without a mount it is lost on every recreate ([#262](https://github.com/catduckgnaf/print-buddy/issues/262), [#270](https://github.com/catduckgnaf/print-buddy/issues/270)). Mount the whole of `/data/.config`, not only `bambu/`: a mount point Docker creates itself is owned by root.
+
+3. Write `docker-compose.override.yml` next to `docker-compose.yml`. Compose merges it over the checked-in file, so `docker-compose.yml` stays untouched:
+
+   ```yaml
+   services:
+     combined:
+       # Until #256 lands: run only the Discord bot. The Moonraker listener and the
+       # bundled Spoolman are not started, so the stock healthcheck would fail.
+       command: ["python3", "-m", "print_buddy.bot"]
+       healthcheck:
+         test: ["CMD", "python3", "-m", "print_buddy.bot", "health"]
+         interval: 30s
+         timeout: 10s
+         start_period: 90s
+         retries: 3
+       volumes:
+         - ${PRINT_BUDDY_DATA:-./data}/dot-config:/data/.config
+         - ./print-buddy.yaml:/data/config/print-buddy.yaml:ro
+   ```
+
+   `command` works because the supervisor runs whatever arguments it receives instead of its children (`docker/supervise.sh`). The entrypoint still selects the bundled OrcaSlicer and starts Xvfb for headless slicing. `python3 -m print_buddy.bot health` is the bot's own heartbeat check (`print_buddy/bot/health.py`). The second mount is the settings file from step 6; create it before the first `up`.
+
+4. In `.env`, set the printer and the slicer:
+
+   ```bash
+   PRINT_BUDDY__PRINTER__MODEL=bambulab.a1
+   PRINT_BUDDY__PRINTER__SLICER=orca
+   PRINT_BUDDY_CONFIG=/data/config/print-buddy.yaml
+   ```
+
+   Bambu Lab printers default to Bambu Studio as the slicer, but the published image is built with `WITH_BAMBU=false` and has no `/usr/bin/bambu-studio`, so slicing would fail closed. `orca` selects the bundled OrcaSlicer 2.4.2 (`PRINT_BUDDY_ORCA_CHANNEL=stable`, the default). `PRINT_BUDDY_CONFIG` is read by Compose for variable substitution and names the file from step 6. Leave `PRINT_BUDDY__SERVICES__MOONRAKER_URL` empty: settings refuse to load for a Bambu model when it is set.
+
+With `.env` complete (steps 4, 5 and 6 add the rest), start the container with `docker compose up -d` and watch `docker compose logs -f combined`. Nothing contacts the printer yet.
+
+## 2. Generate the A1 templates inside the container
+
+**Why:** the A1 slicer profiles are OrcaSlicer's and Bambu Lab's (AGPL-3.0) and are not shipped; Print Buddy builds its templates from an installed OrcaSlicer and refuses to slice until it has them (see [Set up the A1 profiles](BAMBU-LAB.md#set-up-the-a1-profiles)).
+
+The image extracts the pinned OrcaSlicer 2.4.2 AppImage to `/opt/orca-stable` (`docker/orca-prebuilt.sh`), so its resources folder, the one holding `profiles/BBL.json`, is `/opt/orca-stable/resources`. Run the generator in the running container:
+
+```bash
+docker compose exec combined python3 scripts/bambu-templates.py --printer a1 --resources /opt/orca-stable/resources
+docker compose exec combined python3 scripts/bambu-templates.py --printer a1 --resources /opt/orca-stable/resources --check
+```
+
+The first command reports `wrote Bambu Lab A1 Orca templates from OrcaSlicer 2.4.2 (BBL vendor profiles 02.01.00.19) to /data/hermes/state/orca-profiles/bambulab_a1`; `--check` writes nothing and should end with `matches; generated folder is current`. The templates live in the `hermes` volume, so they survive a recreate. Nothing is downloaded. Do not select `PRINT_BUDDY_ORCA_CHANNEL=alpha`: OrcaSlicer 2.5 packs its profiles and is refused.
+
+## 3. Write the hardware record by hand
+
+**Why:** slicing, the color question and the readiness check read the installed nozzle and the loaded spool from `<hermes_home>/state/printer_hardware.json` (`print_buddy/core/printer_state.py`). The `set --spool` command that normally fills it reads a Spoolman record and then writes the Moonraker active spool, neither of which exists in this setup, so the file is written by hand ([#263](https://github.com/catduckgnaf/print-buddy/issues/263) covers the proper fix).
+
+Create `data/hermes/state/printer_hardware.json` on the host (the container sees it as `/data/hermes/state/printer_hardware.json`). This is a complete record for one black PETG spool with the stock 0.4 mm stainless steel nozzle:
+
+```json
+{
+  "printer": "Bambu Lab A1",
+  "moonraker_url": "",
+  "bed_mm": [256, 256],
+  "max_print_height_mm": 256,
+  "nozzle": {"diameter_mm": 0.4, "type": "stainless_steel", "installed": "2026-10-26"},
+  "spool": {
+    "spoolman_id": 1,
+    "name": "Black PETG",
+    "material": "PETG",
+    "diameter_mm": 1.75,
+    "density": 1.27,
+    "color_code": "#000000"
+  },
+  "temps_c": {"nozzle": 240, "bed": 85},
+  "ifs_slots": {
+    "1": {
+      "spoolman_id": 1,
+      "name": "Black PETG",
+      "color": "Black",
+      "material": "PETG",
+      "hex": "#000000",
+      "physical_color_verified": true
+    }
+  }
+}
+```
+
+Make the file owned by 1000:1000. What each part does, and what you see when it is missing:
+
+| Key | Used for | If missing or wrong |
+|---|---|---|
+| `ifs_slots` with one slot | The color/material labels offered on the first link and the slot the slice is bound to | `requires one to four distinct configured slots` (the link is refused) |
+| `bed_mm`, `max_print_height_mm` | Placement on the bed and the fit check | `Slicing failed: 'bed_mm'` |
+| `ifs_slots.1.spoolman_id`, `material`, `physical_color_verified: true` | The guard that the physical slot matches what is sliced | `IFS slot color/material mapping is unverified` |
+| `hex` | The filament color written into the slice; must be six hex digits | `filament color must be an explicit six-digit RGB value` |
+| `spool.material`, `temps_c` | Material family and the temperatures the G-code guard checks; 240/85 °C are the documented PETG defaults | An unrecognised material fails closed |
+| `nozzle` | The A1 accepts only 0.4 mm, stainless or hardened steel | A readiness problem naming the supported sizes |
+
+`spoolman_id: 1` is a label here, not a lookup: with no Spoolman the check logs `Spoolman check skipped` as a warning and continues on the recorded state (#235 behaviour). Two things to know:
+
+- **Settings and state are read once per process.** Restart the bot after editing the file: `docker compose restart combined`.
+- **Editing the record invalidates jobs prepared before the edit.** A prepared job is bound to a recipe hash of the state it was prepared with (`slice_recipe.binding_sha256`), so a link you posted before the edit will refuse to slice. Post the link again.
+
+## 4. MakerWorld token
+
+**Why:** MakerWorld model lookups and downloads are sent with an `Authorization: Bearer` header read from `~/.config/bambu/token` (`maker_headers` in `print_buddy/core/model_job.py`). Printables needs none.
+
+Sign in at makerworld.com in a browser, open the developer tools and copy the value of the site cookie named `token`. On the host, store it as the only line of the file the container sees as `/data/.config/bambu/token`:
+
+```bash
+mkdir -p data/dot-config/bambu
+(umask 077 && cat > data/dot-config/bambu/token)   # paste the cookie value, press Enter, then Ctrl-D
+chmod 700 data/dot-config/bambu && chmod 600 data/dot-config/bambu/token
+sudo chown -R 1000:1000 data/dot-config
+```
+
+No restart is needed; the file is read on each MakerWorld request. A wrong or expired token does not fail early: the model lookup still answers and the summary is posted, and only the download is refused ([#262](https://github.com/catduckgnaf/print-buddy/issues/262)). When downloads start failing, sign in again and replace the file.
+
+## 5. Discord: first link, first slice
+
+**Why:** the standalone bot serves one channel and only the listed users; everything else is ignored, so an empty list refuses everyone.
+
+1. In `.env`, set the three values from [Discord bot setup](DISCORD-BOT-SETUP.md) and restart:
+
+   ```bash
+   DISCORD_BOT_TOKEN=...
+   PRINT_BUDDY__DISCORD__CHAT_ID=123456789012345678
+   PRINT_BUDDY__DISCORD__ALLOWED_USER_IDS=234567890123456789
+   ```
+
+   `docker compose exec combined python3 -m print_buddy.bot check` validates mode, token presence, channel, users and handlers offline before you connect.
+
+2. Post a MakerWorld or Printables model link in the channel. The bot replies with the model summary, then the questions:
+   - **Colors.** A multi-part or painted model first asks `Choose colors for these parts or one color for everything?`; answer **One color for everything**. The A1 path is single colour (AMS Lite is not driven), so per-part colors would be refused at slicing. Then, for every model, `Choose the color for <model>` offers the slot labels from step 3; with one slot that is one button, `Black PETG`.
+   - **What to do with the slice.** The choices are `Slice and print now (bed is clear)` (only after step 6), `Slice only`, `Stop with colors saved` and `Cancel print request`. For the first run pick **Slice only**: it slices and verifies, and never touches the printer.
+   - **Delivery.** After a `Slice only`, the delivery menu offers `Send the files here` (the G-code as a Discord attachment) and `Package for Bambu (no upload)`, which builds the `.gcode.3mf` in Bambu Studio's export layout. Each runs at most once per slice.
+
+3. Known limits on this step today:
+   - **Single-extruder slices fail the post-slice check** until [#268](https://github.com/catduckgnaf/print-buddy/issues/268) lands. The slice itself completes; the failure is in the check that follows.
+   - **Attachment size.** `discord.upload_max_bytes` is 9 500 000 bytes (`PRINT_BUDDY__DISCORD__UPLOAD_MAX_BYTES`). A 22.9 MB package cannot be posted, so fetch it from the host: the handoff writes it to a `bambu/` folder beside the plate's G-code in the job folder under the data directory ([#272](https://github.com/catduckgnaf/print-buddy/issues/272) tracks delivering it another way).
+
+## 6. LAN printing opt-in
+
+**Why:** a Start button exists only when three separate things hold (see [Printing over LAN](BAMBU-LAB.md#printing-over-lan-opt-in)): `printer` is in `delivery.methods`, LAN status is configured, and the printer is in Developer Mode. None is a default, so nobody gets a print button by accident.
+
+1. **`delivery.methods` in a mounted YAML.** It is a list, and lists cannot come from the environment. A file selected with `PRINT_BUDDY_CONFIG` replaces the automatic file; it does not layer on top of `config/docker.yaml` ([YAML configuration](CONFIGURATION-YAML.md)). So copy the image's defaults and add the one section ([#270](https://github.com/catduckgnaf/print-buddy/issues/270) asks for a layered override):
+
+   ```bash
+   docker compose run --rm --no-deps --entrypoint cat combined /app/config/docker.yaml > print-buddy.yaml
+   ```
+
+   Then append to `print-buddy.yaml`:
+
+   ```yaml
+   delivery:
+     methods: [printer, discord, bambu_handoff]
+   ```
+
+   The order does not matter; settings keep the vendor's order. Any method the Bambu Lab vendor profile does not offer stops startup and names the setting. The file is mounted read-only at `/data/config/print-buddy.yaml` by the override from step 1, and `PRINT_BUDDY_CONFIG` in `.env` points at it. `printer.model` in the copy still says `flashforge.ad5x`; the environment value from step 1 wins.
+
+2. **LAN status in `.env`.** Host and serial are settings; the access code is a secret, never a setting:
+
+   ```bash
+   PRINT_BUDDY__BAMBU__LAN_HOST=192.168.1.50
+   PRINT_BUDDY__BAMBU__LAN_SERIAL=00M00A000000000
+   BAMBU_LAN_PASSWORD=12345678
+   ```
+
+   The serial is on the printer under Settings > WLAN, with the access code. The code changes after a factory reset.
+
+3. **On the A1:** turn on LAN Only Mode, then Developer Mode (both under Settings). Developer Mode is what lets the firmware accept unsigned MQTT commands; without it Print Buddy reads the signature bit from the status snapshot and refuses before sending anything. What it switches off: Bambu Handy, cloud access, and Bambu Studio's own connection to the printer, which then shows "failed to connect to printer". Expect that; it is not a Print Buddy error.
+
+4. **Restart** (`docker compose up -d` after the YAML and `.env` changes), post the link again, and the first question now starts with **Slice and print now (bed is clear)**. Tapping it is the single-use bed-clear approval for that exact slice. The path from there is the one [Bambu Lab printers](BAMBU-LAB.md#printing-over-lan-opt-in) describes: readiness over MQTT, offline G-code verification, package build, lease, readiness again, FTPS upload with the remote size read back, then the `project_file` start command, confirmed from a fresh status snapshot.
+
+What to expect from the pending fixes on this step:
+
+- **The Discord button's idle check** (`live_idle_check` in `print_buddy/hermes/print_next.py`) queries Moonraker, so on a Bambu printer it is not a live check of the A1 until [#269](https://github.com/catduckgnaf/print-buddy/issues/269) lands. Look at the printer yourself before you confirm the bed is clear.
+- **"submitted, awaiting confirmation".** A start that the printer accepted can still be reported this way when the confirming snapshot does not arrive in time ([#271](https://github.com/catduckgnaf/print-buddy/issues/271)). The print is running; the record is uncertain. Once you see the printer printing, settle it, and only then:
+
+  ```bash
+  docker compose exec combined python3 -m print_buddy.core.model_job reconcile-launch --started
+  ```
+
+  Never resubmit. The lease refuses a second start on the printer while the first is uncertain.
+- **`/print-stop` cannot stop a Bambu print** until [#276](https://github.com/catduckgnaf/print-buddy/issues/276); stop it from the printer screen. The stop, pause and resume calls exist on the LAN client but the Discord command does not reach them.
+- **No preview thumbnails** in the handoff package ([#275](https://github.com/catduckgnaf/print-buddy/issues/275)): the printer screen shows the file without a picture.
+
+## 7. What is normal in the messages
+
+- `spool weight unknown` in the spool projection line: there is no Spoolman record to take the remaining weight from.
+- `Estimated total: unknown` on the start message: the start message on this path carries no time estimate (`discord_print_summary` prints `unknown` when it is given none).
+- Two to three minutes of silence after you confirm: the package is being uploaded over FTPS and the start confirmed. Nothing is posted until that completes.
+- "AD5X" in the summary wording: the estimate text names the AD5X regardless of the configured printer ([#273](https://github.com/catduckgnaf/print-buddy/issues/273)). The slice is for the A1.
+
+## 8. What worked
+
+On 26 Oct 2026, with the 2.1.3 image and the steps above, a link posted in Discord was sliced with the bundled OrcaSlicer 2.4.2 using the generated A1 templates, packaged, uploaded over FTPS to the A1, started with `project_file`, and the printer reported printing. That is the first run of the LAN print path on real hardware; [Bambu Lab printers](BAMBU-LAB.md) still describes the path as untested where it was written before this run, and its evidence table has not been updated for it.

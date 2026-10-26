@@ -9,6 +9,7 @@ from print_buddy.printers.bambulab.p1s import P1SAdapter
 HERMES = Path(tempfile.mkdtemp(prefix="p1s-test-profile-"))
 NAMES = {"machine": "Bambu Lab P1S 0.4 nozzle", "process": "0.20mm Standard @BBL X1C",
          "filament": "Bambu PLA Basic @BBL X1C"}
+FILAMENTS = {m: n for m, n in facts.P1S["orca_filaments"].value.items() if n != NAMES["filament"]}
 
 
 def resources(root):
@@ -42,6 +43,13 @@ def resources(root):
                 "compatible_printers": [NAMES["machine"]]}
     for filename, data in (("machine", machine), ("process", process), ("filament", filament)):
         (bbl / filename / f"{filename}.json").write_text(json.dumps(data))
+    # One invented profile for each other checked material, under the names facts.P1S selects.
+    for material, name in FILAMENTS.items():
+        index["filament_list"].append({"name": name, "sub_path": f"filament/{material}.json"})
+        (bbl / "filament" / f"{material}.json").write_text(json.dumps({
+            **filament, "name": name, "filament_type": [material],
+            "filament_start_gcode": [f"; fixture {material} filament start\\n"]}))
+    (root / "profiles" / "BBL.json").write_text(json.dumps(index))
     return root
 
 
@@ -49,7 +57,9 @@ def identity(root=None):
     root = resources(root or Path(tempfile.mkdtemp(prefix="p1s-resources-")))
     upstream, version = profiles.flatten(root, NAMES)
     return {"label": "Print Buddy invented P1S fixture (not OrcaSlicer)", "vendor_version": version,
-            "sha256": {kind: profiles.sha256(upstream[kind]) for kind in profiles.KINDS}}
+            "sha256": {kind: profiles.sha256(upstream[kind]) for kind in profiles.KINDS},
+            "filaments": {name: profiles.sha256(data)
+                          for name, data in profiles.flatten_filaments(root, FILAMENTS.values()).items()}}
 
 
 def fixture_facts():

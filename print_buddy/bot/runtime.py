@@ -39,7 +39,10 @@ HELP_WORDS = {"/print-help", "/help", "help"}
 
 def allowed_users(cfg, section="discord"):
     """Allowed user IDs from a platform's settings section, plus its approver."""
-    ids = settings.user_ids(cfg[section].get("allowed_user_ids"))
+    if section == "matrix":  # Matrix IDs are @user:server strings, not numbers (#164 stage 3)
+        ids = settings.matrix_user_ids(cfg[section].get("allowed_user_ids"))
+    else:
+        ids = settings.user_ids(cfg[section].get("allowed_user_ids"))
     approver = str(cfg[section].get("approval_user_id") or "").strip()
     if approver and approver not in ids:
         ids.append(approver)

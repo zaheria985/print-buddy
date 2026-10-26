@@ -12,6 +12,9 @@
   ],
   "filament_list": [
     {"name": "fixture_filament_common", "sub_path": "filament/fixture_filament_common.json"},
-    {"name": "Generic PLA @BBL A1", "sub_path": "filament/Generic PLA @BBL A1.json"}
+    {"name": "Generic PLA @BBL A1", "sub_path": "filament/Generic PLA @BBL A1.json"},
+    {"name": "Generic PETG @BBL A1", "sub_path": "filament/Generic PETG @BBL A1.json"},
+    {"name": "Generic TPU @BBL A1", "sub_path": "filament/Generic TPU @BBL A1.json"},
+    {"name": "Generic PVA @BBL A1", "sub_path": "filament/Generic PVA @BBL A1.json"}
   ]
 }

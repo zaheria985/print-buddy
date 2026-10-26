@@ -110,6 +110,66 @@ def test_discord_plan_attaches_small_files_zips_big_gcode_and_reports_what_canno
     assert "sent zipped" in delivery.discord_message(zipped, limit)
 
 
+# ----------------------------------------------------------------------------- early size check (#272)
+
+def test_deflated_size_is_what_a_zip_entry_would_weigh(tmp_path):
+    g = tmp_path / "plate.gcode"
+    g.write_text("G1 X10 Y10 E0.5\n" * 5000)
+    with zipfile.ZipFile(tmp_path / "plate.zip", "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        archive.write(g, g.name)
+    with zipfile.ZipFile(tmp_path / "plate.zip") as archive:
+        assert delivery.deflated_size(g) == archive.getinfo("plate.gcode").compress_size
+    assert delivery.package_target(g) == tmp_path / "bambu" / "plate.gcode.3mf"
+
+
+def test_discord_candidates_size_each_file_before_the_button_is_offered(tmp_path, monkeypatch, bambu_model):
+    small = tmp_path / "small.gcode"
+    small.write_text("G1 X1\n" * 10)
+    big_text = tmp_path / "big.gcode"
+    big_text.write_text("G1 X10 Y10 E0.5\n" * 20000)  # compresses well: fits zipped
+    noise = tmp_path / "noise.gcode"
+    noise.write_bytes(random.Random(1).randbytes(256_000))  # does not compress: never fits
+    limit = 40_000
+    measured = []
+    real = delivery.deflated_size
+    monkeypatch.setattr(delivery, "deflated_size", lambda path, level=9: measured.append(path) or real(path, level))
+    cache = {}
+    plain = config_for("sovol.sv06", ["printer", "discord"], upload_max_bytes=limit)
+    fit = {c.source.name: c for c in delivery.discord_candidates([small, big_text, noise], limit, plain, cache)}
+    assert fit["small.gcode"].fits and fit["small.gcode"].packed is None  # under the limit: not measured
+    assert fit["big.gcode"].fits and fit["big.gcode"].packed <= limit < fit["big.gcode"].size
+    assert not fit["noise.gcode"].fits and fit["noise.gcode"].packed > limit
+    assert measured == [big_text, noise]
+    delivery.discord_candidates([small, big_text, noise], limit, plain, cache)
+    assert measured == [big_text, noise]  # a menu shown twice measures once
+    msg = delivery.oversize_message(list(fit.values()), limit)
+    assert msg.startswith(f"noise.gcode is 0.3 MB and {fit['noise.gcode'].packed / 1e6:.1f} MB zipped, over the "
+                          f"0.0 MB Discord upload limit, so it cannot be sent here. It stays on the Print Buddy host at {noise}.")
+    assert "is not offered" not in msg  # the others still fit, so the button stays
+    assert delivery.oversize_message([fit["small.gcode"], fit["big.gcode"]], limit) == ""
+    # Bambu Lab: the attachment is the package. Not built yet, it is sized from its G-code ...
+    bambu = config_for(BAMBU_KEY, upload_max_bytes=limit)
+    [est] = delivery.discord_candidates([noise], limit, bambu, cache)
+    assert est.source == delivery.package_target(noise) and est.size is None and est.built_from == noise
+    assert not est.fits and est.packed == fit["noise.gcode"].packed
+    msg = delivery.oversize_message([est], limit)
+    assert msg.startswith(f"noise.gcode.3mf would be about {est.packed / 1e6:.1f} MB (its G-code noise.gcode is 0.3 MB), "
+                          "over the 0.0 MB Discord upload limit, so it cannot be sent here. "
+                          f"'Package for Bambu (no upload)' writes it to {est.source} on the Print Buddy host.")
+    assert msg.endswith("'Send the files here' is not offered for this slice; "
+                        "[discord] upload_max_bytes is the limit (docs/SETTINGS.md).")
+    # ... and once built, exactly, with no deflate pass (a .3mf is already compressed).
+    package = delivery.bambu_package(noise, est.source)
+    [exact] = delivery.discord_candidates([noise], limit, bambu, cache)
+    assert exact.source == package and exact.size == package.stat().st_size > limit and exact.packed is None
+    assert not exact.fits and measured == [big_text, noise]
+    assert delivery.oversize_message([exact], limit, for_handoff=True) == (
+        f"noise.gcode.3mf is {exact.size / 1e6:.1f} MB, over the 0.0 MB Discord upload limit, so it cannot be "
+        f"sent here. It stays on the Print Buddy host at {package}.")
+    [tiny] = delivery.discord_candidates([small], limit, bambu, cache)
+    assert tiny.fits and tiny.size is None and tiny.packed is None
+
+
 # ----------------------------------------------------------------------------- Bambu package
 
 def test_bambu_package_has_the_plate_gcode_and_its_md5(tmp_path):
@@ -186,14 +246,43 @@ def test_send_files_then_start_uses_the_same_bed_clear_button(env, monkeypatch):
     assert _delivery_menu(adapter)[-1]["question"].startswith("Anything else for this slice?")
 
 
-def test_too_big_for_discord_is_reported_and_kept_on_the_host(env, monkeypatch):  # noqa: F811
+def test_too_big_for_discord_is_said_up_front_and_the_send_is_not_offered(env, monkeypatch):  # noqa: F811
+    """#272: a file over the limit gets its size, the limit and its host path in the menu, not a button that fails."""
     use_config(monkeypatch, config_for("flashforge.ad5x", ["printer", "discord"], upload_max_bytes=10))
+    # one color, slot 1, Slice only, Done (the send button is absent)
+    adapter, result, receipt = run_flow(env, [1, 0, 1, 1])
+    [menu] = _delivery_menu(adapter)
+    assert menu["choices"] == [print_next.START_LABEL, delivery.DONE_LABEL]
+    size = Path(env.sliced[0]).stat().st_size / 1e6
+    assert (f"\nplate_1.gcode is {size:.1f} MB and {delivery.deflated_size(env.sliced[0]) / 1e6:.1f} MB zipped, "
+            f"over the 0.0 MB Discord upload limit, so it cannot be sent here. It stays on the Print Buddy host at "
+            f"{env.sliced[0]}.\n'Send the files here' is not offered for this slice; [discord] upload_max_bytes "
+            "is the limit (docs/SETTINGS.md).") in menu["question"]
+    assert not any("MEDIA:" in m or "Too big for Discord" in m for m in adapter.sent)
+    assert "deliveries" not in receipt and env.starts == []
+    assert receipt["status"] == "SLICED_NOT_STARTED"
+
+
+def test_under_the_limit_the_send_is_offered_without_a_size_note(env, monkeypatch):  # noqa: F811
+    use_config(monkeypatch, config_for("flashforge.ad5x", ["printer", "discord"], upload_max_bytes=10_000))
     adapter, result, receipt = run_flow(env, [1, 0, 1, 1, 1])
-    assert not any("MEDIA:" in m for m in adapter.sent)
-    assert any("over the 0.0 MB Discord upload limit" in m and env.sliced[0] in m for m in adapter.sent)
-    assert any("Sent 0 of 1 file(s) here. Too big for Discord: plate_1.gcode." in m for m in adapter.sent)
-    assert receipt["deliveries"][0]["complete"] is True  # nothing a retry could fix
-    assert env.starts == []
+    menus = _delivery_menu(adapter)
+    assert menus[0]["choices"] == [print_next.START_LABEL, "Send the files here", delivery.DONE_LABEL]
+    assert "upload limit" not in menus[0]["question"] and "upload limit" not in menus[1]["question"]
+    attached = [m for m in adapter.sent if "MEDIA:" in m]
+    assert len(attached) == 1 and attached[0].endswith(f"MEDIA:{env.sliced[0]}")
+
+
+def test_discord_only_profile_still_tells_the_operator_where_a_too_big_file_is(env, monkeypatch):  # noqa: F811
+    """No menu can carry the note when the send was the only option: it is posted on its own."""
+    use_config(monkeypatch, config_for("klipper.generic", ["discord"], upload_max_bytes=10))
+    adapter, result, receipt = run_flow(env, [1, 0, 0])
+    assert _delivery_menu(adapter) == []
+    note = next(m for m in adapter.sent if m.startswith("plate_1.gcode is "))
+    assert "over the 0.0 MB Discord upload limit" in note and env.sliced[0] in note
+    assert "'Send the files here' is not offered for this slice" in note
+    assert adapter.sent.index(note) < adapter.sent.index("Sliced. Nothing uploaded or started.")
+    assert not any("MEDIA:" in m for m in adapter.sent) and "deliveries" not in receipt and env.starts == []
 
 
 def test_discord_failure_is_reported_and_retry_sends_only_the_rest(env, monkeypatch):  # noqa: F811
@@ -250,11 +339,54 @@ def test_bambu_printer_offers_no_print_and_hands_off_a_package(env, monkeypatch,
     assert menus[0]["question"].endswith("Sliced and validated. What should I do with the files?")
     assert menus[1]["choices"] == ["Send the files here", delivery.DONE_LABEL]
     ready = next(m for m in adapter.sent if m.startswith("Bambu package ready: plate_1.gcode.3mf."))
+    assert ready.startswith("Bambu package ready: plate_1.gcode.3mf. Use 'Send the files here' to download it.\n")
     assert "Nothing was uploaded to the Test Bambu and no print was started" in ready
     attached = [m for m in adapter.sent if "MEDIA:" in m]
     assert len(attached) == 1 and attached[0].endswith("plate_1.gcode.3mf")
     assert env.starts == [] and receipt["status"] == "SLICED_NOT_STARTED"
     assert [d["method"] for d in receipt["deliveries"]] == ["bambu_handoff", "discord"]
+
+
+def test_bambu_package_over_the_limit_is_never_offered_for_download(env, monkeypatch, bambu_model):  # noqa: F811
+    """#272: the operator learns the size, the limit and the host path before and after packaging, never
+    from a send that fails. The A1 package from the issue was 22.9 MB against a 9.5 MB limit."""
+    limit = 100_000
+    use_config(monkeypatch, config_for(BAMBU_KEY, upload_max_bytes=limit))
+    real_slice = model_job.slice_job
+    rng = random.Random(272)
+
+    def bambu_slice(job_path, **kw):
+        out = real_slice(job_path, **kw)
+        # Incompressible enough that the package stays well over the limit.
+        Path(out[0]).write_text("".join(f"G1 X{rng.uniform(1, 99):.3f} Y{rng.uniform(1, 99):.3f} "
+                                         f"E{rng.uniform(0, 1):.5f}\n" for _ in range(20000)))
+        data = json.loads(Path(job_path).read_text())
+        model_job.write_job(Path(job_path).parent, {**data, "printer_model": BAMBU_KEY})
+        return out
+    monkeypatch.setattr(model_job, "slice_job", bambu_slice)
+    # one color, slot 1, "Slice only", package (the menu then ends: nothing is left to offer)
+    adapter, result, receipt = run_flow(env, [1, 0, 0, 0])
+    gcode = Path(env.sliced[0])
+    package = delivery.package_target(gcode)
+    packed = delivery.deflated_size(gcode)
+    assert packed > limit
+    [menu] = _delivery_menu(adapter)
+    assert menu["choices"] == ["Package for Bambu (no upload)", delivery.DONE_LABEL]
+    assert (f"\nplate_1.gcode.3mf would be about {packed / 1e6:.1f} MB (its G-code plate_1.gcode is "
+            f"{gcode.stat().st_size / 1e6:.1f} MB), over the 0.1 MB Discord upload limit, so it cannot be sent here. "
+            f"'Package for Bambu (no upload)' writes it to {package} on the Print Buddy host.\n"
+            "'Send the files here' is not offered for this slice; [discord] upload_max_bytes is the limit "
+            "(docs/SETTINGS.md).") in menu["question"]
+    ready = next(m for m in adapter.sent if m.startswith("Bambu package ready: plate_1.gcode.3mf."))
+    assert package.is_file() and package.stat().st_size > limit
+    assert ready.startswith(f"Bambu package ready: plate_1.gcode.3mf. plate_1.gcode.3mf is "
+                            f"{package.stat().st_size / 1e6:.1f} MB, over the 0.1 MB Discord upload limit, so it "
+                            f"cannot be sent here. It stays on the Print Buddy host at {package}.\n")
+    assert "Use 'Send the files here'" not in ready
+    assert not any("MEDIA:" in m or "Too big for Discord" in m for m in adapter.sent)
+    assert sum("over the 0.1 MB Discord upload limit" in m for m in adapter.sent) == 1  # said once after packaging
+    assert [d["method"] for d in receipt["deliveries"]] == ["bambu_handoff"]
+    assert env.starts == [] and receipt["status"] == "SLICED_NOT_STARTED" and "bed_clear_approval" not in receipt
 
 
 def test_multi_plate_partial_delivery_reports_each_plate(tmp_path, monkeypatch):
@@ -282,3 +414,39 @@ def test_multi_plate_partial_delivery_reports_each_plate(tmp_path, monkeypatch):
                        "Nothing was uploaded to a printer or started.")
     [entry] = receipt["deliveries"]
     assert [f["ok"] for f in entry["files"]] == [True, False] and entry["detail"] == "1 of 2 sent"
+
+
+def test_bambu_package_carries_the_plate_previews_the_a1_and_the_apps_read(tmp_path, bambu_model):
+    """#275: Metadata/plate_<n>.png (512) and plate_<n>_small.png (128), rendered offline from the sliced geometry."""
+    import io
+    from PIL import Image
+    from .test_plate_thumbnail import box_stl
+    job, gcodes, _ = _job_with(tmp_path, "G28\nG1 X1 E1\n")
+    box_stl(gcodes[0].parent / "geometry.stl", origin=(100, 100, 0))
+    cfg = config_for(BAMBU_KEY)
+    package = delivery.bambu_handoff({**job, "printer_model": BAMBU_KEY}, gcodes, cfg)[0]
+    with zipfile.ZipFile(package) as archive:
+        names = set(archive.namelist())
+        assert {"Metadata/plate_1.gcode", "Metadata/plate_1.gcode.md5", "Metadata/slice_info.config",
+                "Metadata/plate_1.png", "Metadata/plate_1_small.png"} <= names
+        assert not any(n.startswith("Metadata/pick_") or n.startswith("Metadata/top_") for n in names)
+        assert archive.read("Metadata/plate_1.gcode") == gcodes[0].read_bytes()
+        assert archive.read("Metadata/plate_1.gcode.md5").decode() == hashlib.md5(gcodes[0].read_bytes()).hexdigest().upper()
+        for name, size in (("Metadata/plate_1.png", 512), ("Metadata/plate_1_small.png", 128)):
+            image = Image.open(io.BytesIO(archive.read(name)))
+            assert image.format == "PNG" and image.size == (size, size)
+        assert "png" not in archive.read("Metadata/slice_info.config").decode()  # Bambu's slice_info names no images
+    first = package.read_bytes()
+    assert delivery.bambu_handoff({**job, "printer_model": BAMBU_KEY}, gcodes, cfg)[0].read_bytes() == first
+
+
+def test_bambu_package_without_a_preview_source_is_still_built(tmp_path, bambu_model, monkeypatch):
+    job, gcodes, _ = _job_with(tmp_path, "G28\nG1 X1 E1\n")
+    cfg = config_for(BAMBU_KEY)
+    with zipfile.ZipFile(delivery.bambu_handoff({**job, "printer_model": BAMBU_KEY}, gcodes, cfg)[0]) as archive:
+        assert not [n for n in archive.namelist() if n.endswith(".png")]
+    # A renderer failure is cosmetic: logged, never a refused delivery.
+    monkeypatch.setattr(delivery.plate_thumbnail, "plate_thumbnails",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no preview")))
+    with zipfile.ZipFile(delivery.bambu_handoff({**job, "printer_model": BAMBU_KEY}, gcodes, cfg)[0]) as archive:
+        assert "Metadata/plate_1.gcode" in archive.namelist() and not [n for n in archive.namelist() if n.endswith(".png")]

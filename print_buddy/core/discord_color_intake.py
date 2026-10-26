@@ -22,7 +22,7 @@ def _visible_choices(question, choices):
 async def collect(job_path, state, adapter, chat_id, session_key, metadata=None, timeout=None):
     from .prompts import gateway as _prompts
     cm = _prompts()
-    from .model_job import intake_color_choices, set_color_decisions, resolve_filament_selection, write_job, decisions_digest, build_slot_labels
+    from .model_job import intake_color_choices, set_color_decisions, resolve_filament_selection, write_job, decisions_digest, build_slot_labels, configured_slots
     from .source_colors import inventory, prompts, canonical_prompts, grouped_prompts, validate_decisions
     path = Path(job_path)
     timeout = settings.current()["discord"]["question_timeout_s"] if timeout is None else timeout
@@ -36,7 +36,7 @@ async def collect(job_path, state, adapter, chat_id, session_key, metadata=None,
     if job.get('color_manifest', {}).get('source_sha256') != source_hash:
         raise ValueError('source changed before Discord presentation')
     selections = [resolve_filament_selection(state, dict(label, slot=int(slot)))
-                  for slot, label in sorted(state.get('ifs_slots', {}).items())]
+                  for slot, label in sorted(configured_slots(state).items())]
     labels = build_slot_labels(selections)
     if not labels or len(labels) > settings.current()['printer']['ifs_slots'] or len(set(labels)) != len(labels):
         raise ValueError('Discord requires one to four distinct configured slots')

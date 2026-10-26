@@ -212,3 +212,25 @@ def test_p1s_defaults_to_bambu_studio_like_every_bambu_printer():
     for key in ("bambulab.a1", "bambulab.p1s"):
         config = settings.load(local=False, environ={"PRINT_BUDDY__PRINTER__MODEL": key})
         assert config["printer"]["slicer"] == "bambu_studio", key
+
+
+def test_p1s_slices_each_material_with_its_checked_profile_and_refuses_the_rest(p1s_profiles, tmp_path, monkeypatch):
+    """#264 on the P1S: the same selection as the A1, with the P1S's own checked profile names."""
+    st = state()
+    st["spool"]["material"], st["temps_c"] = "PETG", {"nozzle": 240, "bed": 80}
+    petg = facts.P1S["orca_filaments"].value["PETG"]
+    text = p1s_gcode(material="PETG", bed=80, hotend=240).replace(
+        f'filament_settings_id = "{facts.P1S["orca_profiles"].value["filament"]}"', f'filament_settings_id = "{petg}"')
+
+    def run(command, **_):
+        Path(command[command.index("--outputdir") + 1], "plate_1.gcode").write_text(text)
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(orca_adapter.subprocess, "run", run)
+    orca_adapter.slice_model(CUBE, tmp_path / "slice", st, adapter=adapter_for())
+    assert json.loads((tmp_path / "slice" / "filament.json").read_text())["filament_settings_id"] == [petg]
+    found = adapter_for().gcode_problems(p1s_gcode(material="PETG", bed=80, hotend=240), st)
+    assert any("sliced with the PLA filament profile" in p for p in found), found
+    st["spool"]["material"] = "ASA"
+    with pytest.raises(profiles.ProfileError, match="no checked vendor filament profile for 'ASA'"):
+        orca_adapter.slice_model(CUBE, tmp_path / "slice2", st, adapter=adapter_for())

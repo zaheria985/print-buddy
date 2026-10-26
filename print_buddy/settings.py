@@ -5,7 +5,8 @@ Load order, later wins key by key:
      printer model's own (print_buddy/printers/<vendor>/<printer>.py)
   2. config/home.yaml, falling back to config/home.toml
   3. $PRINT_BUDDY_CONFIG, else config/local.yaml, falling back to config/local.toml
-  4. Environment: PRINT_BUDDY__SECTION__KEY, or a legacy name from LEGACY_ENV
+  4. Environment: PRINT_BUDDY__SECTION__KEY, or a legacy name from LEGACY_ENV. Lists stay file-only
+     except ENV_LISTS, which take a comma- or space-separated value (#270).
 
 The model comes from environment, selected local configuration, then home configuration. [printer] model
 is the full "vendor.printer" key, as every existing config has it, or the printer part with [printer]
@@ -89,6 +90,11 @@ OPTIONAL_KEYS = {("printer", "nozzle_type"): str, ("visual_watch", "enabled"): b
                  ("bambu", "lan_access_code_env"): str,
                  ("slicer", "flash_studio_path"): str,
                  ("flashforge_stock", "host"): str}
+# List settings that may also come from the environment, as a comma- or space-separated value
+# (PRINT_BUDDY__DELIVERY__METHODS=discord,bambu_handoff,printer). Every other list or table is file
+# only. [delivery] methods is here so a Docker operator can opt into the Bambu LAN print button without
+# replacing the image's docker.yaml (#270); the value is validated exactly like the YAML list.
+ENV_LISTS = {("delivery", "methods")}
 DEFAULT_MATERIAL_TEMPS = {
     "PLA": {"nozzle": 210, "bed": 60}, "PETG": {"nozzle": 240, "bed": 85},
     "ABS": {"nozzle": 245, "bed": 100}, "ASA": {"nozzle": 260, "bed": 105},
@@ -183,6 +189,11 @@ def _coerce(expected, raw, name):
     raise SettingsError(f"${name}: [list] settings cannot come from the environment")
 
 
+def _split_list(raw):
+    """A comma- or space-separated environment value as a list of strings; empty entries are dropped."""
+    return [part for part in re.split(r"[\s,]+", raw.strip()) if part]
+
+
 def _from_env(home, environ):
     out = {}
     for name, raw in environ.items():
@@ -194,6 +205,12 @@ def _from_env(home, environ):
         elif name in LEGACY_ENV:
             section, key = LEGACY_ENV[name]
         else:
+            continue
+        if (section, key) in ENV_LISTS:
+            # An empty value changes nothing, like every other Docker feature variable left blank;
+            # the list itself is checked by validate() (for [delivery] methods: _validate_vendor_choices).
+            if raw.strip():
+                out.setdefault(section, {})[key] = _split_list(raw)
             continue
         if key not in home.get(section, {}):
             if (section, key) in OPTIONAL_KEYS:
@@ -322,6 +339,51 @@ def _validate_telegram(data):
     telegram["upload_max_bytes"] = _positive(data, "telegram", "upload_max_bytes", int)
 
 
+MATRIX_ID = r"@[A-Za-z0-9._=+/\-]+:[A-Za-z0-9.\-]+(?::[0-9]+)?"
+
+
+def matrix_user_ids(value, section="matrix"):
+    """Matrix user IDs from a comma or space separated string of full @user:server IDs."""
+    ids = [part for part in re.split(r"[\s,]+", str(value or "").strip()) if part]
+    for part in ids:
+        if not re.fullmatch(MATRIX_ID, part):
+            raise SettingsError(f"[{section}] allowed_user_ids must be full Matrix user IDs "
+                                f"like '@name:matrix.org', got {part!r}")
+    return ids
+
+
+def _validate_matrix(data):
+    """The [matrix] section (#164 stage 3). Absent in an older config means the defaults.
+
+    Matrix user IDs are full ``@user:server`` IDs, not numbers, and a room ID
+    starts with ``!``. The access token itself is never a setting:
+    access_token_env names the environment variable holding it, the same
+    indirection as [discord] token_env.
+    """
+    matrix = data.setdefault("matrix", {})
+    url = str(matrix.setdefault("homeserver_url", "") or "").strip().rstrip("/")
+    if url and not url.startswith(("http://", "https://")):
+        raise SettingsError(f"[matrix] homeserver_url must be an http(s) URL, got {url!r}")
+    matrix["homeserver_url"] = url
+    matrix.setdefault("access_token_env", "MATRIX_ACCESS_TOKEN")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(matrix["access_token_env"])):
+        raise SettingsError(f"[matrix] access_token_env must be an environment variable name, "
+                            f"got {matrix['access_token_env']!r}")
+    room = str(matrix.setdefault("room_id", "") or "").strip()
+    if room and not room.startswith("!"):
+        raise SettingsError(f"[matrix] room_id must be a Matrix room ID starting with '!', got {room!r}")
+    matrix["room_id"] = room
+    matrix_user_ids(matrix.setdefault("allowed_user_ids", ""))
+    for key in ("approval_user_id", "bot_user_id"):
+        value = str(matrix.setdefault(key, "") or "").strip()
+        if value and not re.fullmatch(MATRIX_ID, value):
+            raise SettingsError(f"[matrix] {key} must be a full Matrix user ID like "
+                                f"'@name:matrix.org', got {value!r}")
+        matrix[key] = value
+    matrix.setdefault("upload_max_bytes", 50_000_000)
+    matrix["upload_max_bytes"] = _positive(data, "matrix", "upload_max_bytes", int)
+
+
 def _validate_logging(data):
     """The [logging] section (#150). Absent in a hand-made home file means the defaults."""
     logging_cfg = data.setdefault("logging", {})
@@ -364,6 +426,7 @@ def _validate_bot(data):
         raise SettingsError(f"[discord] token_env must be an environment variable name, got {discord['token_env']!r}")
     user_ids(discord.setdefault("allowed_user_ids", ""))
     _validate_telegram(data)
+    _validate_matrix(data)
     llm = data.setdefault("llm", {})
     for key, default in (("chat_url", ""), ("model", ""), ("api_key_env", "LLM_API_KEY")):
         llm.setdefault(key, default)

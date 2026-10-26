@@ -124,7 +124,7 @@ def test_library_status_is_platform_reported():
     label, available, detail = platform.library_status("telegram")
     assert label == "telegram" and available is True and detail == "standard library client"
     label, available, detail = platform.library_status("matrix")
-    assert available is False and "not implemented yet" in detail
+    assert label == "matrix" and available is True and detail == "standard library client"
 
 
 # ---------------------------------------------------------------------- settings
@@ -137,19 +137,22 @@ def test_a_config_without_the_platform_key_still_yields_discord(tmp_path):
     assert data["bot"]["platform"] == "discord"
 
 
-def test_known_but_unimplemented_platform_validates_and_fails_the_check(tmp_path):
+def test_matrix_platform_validates_and_passes_the_platform_check(tmp_path):
+    # Stage 1 pinned matrix as known-but-unimplemented; stage 3 (#164)
+    # implements it, so the platform row now passes like telegram's.
     data = settings.load(local=False, environ={"PRINT_BUDDY__BOT__PLATFORM": "matrix",
                                                "PRINT_BUDDY__BOT__MODE": "standalone"})
     assert data["bot"]["platform"] == "matrix"
     rows = {label: (ok, detail) for label, ok, detail in bot_main.checks(data)}
-    assert rows["platform"][0] is False and "not implemented yet" in rows["platform"][1]
+    assert rows["platform"] == (True, "matrix")
     assert bot_main.check.__module__  # the check itself ran offline, above
 
 
-def test_botcore_refuses_an_unimplemented_platform(cfg):
+def test_botcore_builds_the_matrix_adapter(cfg):
     cfg["bot"]["platform"] = "matrix"
-    with pytest.raises(ValueError, match="not implemented yet"):
-        runtime.BotCore(FakeClient(), cfg)
+    core = runtime.BotCore(FakeClient(), cfg, chat_id="!prints:example.org")
+    assert core.adapter.name == "matrix" and core.adapter.uses_llm is False
+    assert core.adapter.supports_buttons is False
 
 
 # ---------------------------------------------------------------------- full intake on a fake transport

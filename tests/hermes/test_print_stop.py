@@ -188,3 +188,50 @@ def test_stop_command_declined_sends_nothing():
 
 def test_other_text_ignored():
     assert asyncio.run(plugin.print_stop_dispatch(_event("/print-stopx"), _gateway(FakeAdapter()))) is None
+
+
+def _bambu(monkeypatch, snapshots, configured=True):
+    """Route print_stop through a fake Bambu LAN adapter (#276): snapshots are the normalized status dicts."""
+    from print_buddy import printers
+    client = mock.Mock()
+    client.snapshot.side_effect = list(snapshots)
+    adapter = S(transport="bambulab_lan", lan_configured=lambda: configured, client=lambda: client,
+                normalize_status=lambda raw: raw, control=mock.Mock())
+    monkeypatch.setattr(printers, "current", lambda: adapter)
+    return adapter, client
+
+
+def bst(state, filename="plate_1.gcode.3mf", layer=1, total=513, progress=0.01):
+    return {"state": state, "filename": filename, "layer": layer, "total_layer": total, "progress": progress}
+
+
+def test_bambu_status_reads_the_lan_snapshot_not_moonraker(monkeypatch):
+    _bambu(monkeypatch, [bst("printing")])
+    with mock.patch.object(print_stop, "_call") as call:
+        st_now = print_stop.status()
+    assert st_now["state"] == "printing" and st_now["filename"] == "plate_1.gcode.3mf" and st_now["layer"] == 1
+    call.assert_not_called()
+
+
+def test_bambu_cancel_sends_one_lan_stop_and_explains_the_error_state(monkeypatch):
+    adapter, _ = _bambu(monkeypatch, [bst("printing"), bst("printing"), bst("error")])
+    with mock.patch.object(print_stop, "_call") as call, mock.patch.object(print_stop.time, "sleep"):
+        sent, text = print_stop.cancel("plate_1.gcode.3mf", wait_s=5)
+    assert sent and "acknowledge it on its screen" in text
+    adapter.control.assert_called_once_with("stop")
+    call.assert_not_called()
+
+
+def test_bambu_cancel_refuses_a_different_file_without_sending(monkeypatch):
+    adapter, _ = _bambu(monkeypatch, [bst("printing", filename="other.gcode.3mf")])
+    sent, text = print_stop.cancel("plate_1.gcode.3mf")
+    assert not sent and "different print" in text
+    adapter.control.assert_not_called()
+
+
+def test_bambu_status_refuses_an_unconfigured_lan(monkeypatch):
+    _bambu(monkeypatch, [], configured=False)
+    import pytest
+    with pytest.raises(RuntimeError, match="not configured"):
+        print_stop.status()
+

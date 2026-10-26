@@ -85,6 +85,26 @@ telegram:
   approval_user_id: ''
   # Largest file the bot uploads: the Telegram Bot API cloud limit.
   upload_max_bytes: 50000000
+matrix:
+  # Standalone bot only, when [bot] platform is matrix (#164). The access token
+  # itself never goes in a file here; access_token_env names the environment
+  # variable holding it. The room must be unencrypted: encrypted rooms are
+  # not supported.
+  homeserver_url: ''
+  access_token_env: MATRIX_ACCESS_TOKEN
+  # Room ID of the print room (starts with '!'), from the room's settings.
+  room_id: ''
+  # Matrix user IDs allowed to use the bot, full @user:server form, separated
+  # by commas or spaces. approval_user_id is always allowed. Empty with no
+  # approval_user_id refuses everyone.
+  allowed_user_ids: ''
+  approval_user_id: ''
+  # The bot's own Matrix user ID (@user:server). Empty: asked from the
+  # homeserver (whoami) at startup.
+  bot_user_id: ''
+  # Largest file the bot uploads; the adapter lowers it to the homeserver's
+  # media limit when the server reports a smaller one.
+  upload_max_bytes: 50000000
 bot:
   mode: hermes
   platform: discord

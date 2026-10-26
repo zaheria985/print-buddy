@@ -35,7 +35,7 @@ DEPLOYMENT_FILES = [".env.example", "docker-compose.yml", "Dockerfile",
                     "docker/entrypoint.sh", "docker/orca-build-jobs.sh", "docker/orca-prebuilt.sh", "docker/unraid/print-buddy.xml",
                     "docker/supervise.sh", "docker/healthcheck.py", "config/docker.yaml", "config/docker.toml",
                     "docs/DOCKER.md", "docs/SETTINGS.md", "tests/docker/compose.acceptance.yml"]
-SECRETS = {"DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "LLM_API_KEY", "OCTOPRINT_API_KEY", "MOONRAKER_API_KEY", "CLIPROXY_API_KEY",
+SECRETS = {"DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "MATRIX_ACCESS_TOKEN", "LLM_API_KEY", "OCTOPRINT_API_KEY", "MOONRAKER_API_KEY", "CLIPROXY_API_KEY",
            "OPENVIKING_API_KEY", "BAMBU_LAN_PASSWORD", "AD5X_SERIAL", "AD5X_CHECK_CODE"}
 COMPOSE_VARS = {"PRINT_BUDDY_IMAGE", "PRINT_BUDDY_DATA", "PRINT_BUDDY_SPOOLMAN_DATA", "PRINT_BUDDY_CONFIG", "TZ"}
 RUNTIME_ENV_VARS = {"PRINT_BUDDY_ORCA_CHANNEL", "PRINT_BUDDY_BUNDLED_SPOOLMAN", "SPOOLMAN_HOST"}
@@ -87,7 +87,8 @@ class SettingsParityTests(unittest.TestCase):
                     self.assertTrue(any(name.startswith(f"{section}.<") for name in self.rows), section)
                     continue
                 self.assertIn(f"{section}.{key}", self.rows)
-                expected = f"`{env_name(section, key)}`" if is_scalar(value) else "file only"
+                from_env = is_scalar(value) or (section, key) in settings.ENV_LISTS
+                expected = f"`{env_name(section, key)}`" if from_env else "file only"
                 self.assertEqual(self.rows[f"{section}.{key}"].strip(), expected)
 
     def test_every_reference_row_is_a_real_setting(self):
@@ -118,7 +119,10 @@ class SettingsParityTests(unittest.TestCase):
         environ = {}
         for line in ENV_EXAMPLE.splitlines():
             match = re.match(r"^#? ?(PRINT_BUDDY__[A-Z0-9_]+)=(.+)$", line)
-            if match and "example" not in match.group(2) and match.group(1) != "PRINT_BUDDY__PRINTER__MODEL":
+            # The model line and the delivery list are per-printer: the delivery example is written for
+            # bambulab.a1 (tests/test_settings.py loads it there), docker.yaml selects flashforge.ad5x.
+            if match and "example" not in match.group(2) and match.group(1) not in ("PRINT_BUDDY__PRINTER__MODEL",
+                                                                                 "PRINT_BUDDY__DELIVERY__METHODS"):
                 environ[match.group(1)] = match.group(2)
         self.assertGreater(len(environ), 40)
         data = settings.load(local=ROOT / "config" / "docker.yaml", environ=environ)

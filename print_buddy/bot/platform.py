@@ -26,10 +26,8 @@ Per-platform limits live on the adapter as class attributes: ``name``,
 the platform instead of hard-coding one service's numbers.
 
 Discord is the first implementation (``print_buddy.bot.adapter``),
-Telegram the second (``print_buddy.bot.telegram``). Matrix is a known
-platform name whose implementation lands in a later stage of #164;
-selecting it before its stage lands fails the bot's offline check with a
-clear message instead of starting half a bot.
+Telegram the second (``print_buddy.bot.telegram``) and Matrix the third
+(``print_buddy.bot.matrix``: numbered-list prompts, no buttons, pure bot).
 
 Adding a platform: implement the methods above in a new module under
 ``print_buddy/bot/`` (its adapter class is named ``StandaloneAdapter``,
@@ -88,6 +86,9 @@ def platform_module(name):
     if name == "telegram":
         from . import telegram
         return telegram
+    if name == "matrix":
+        from . import matrix
+        return matrix
     return None
 
 

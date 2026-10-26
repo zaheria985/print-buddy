@@ -2,6 +2,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 HERE = Path(__file__).resolve().parent
 
 from print_buddy.core import makerworld_profiles as profiles
@@ -42,3 +44,18 @@ def test_a1_mini_first_and_nozzle_and_plate_penalties():
     ]
     profiles.annotate(rows)
     assert profiles.choose(rows) is rows[1]
+
+
+def test_missing_token_names_the_file_and_the_doc(monkeypatch, tmp_path):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    with pytest.raises(RuntimeError) as exc:
+        model_job.maker_headers()
+    assert str(tmp_path / '.config/bambu/token') in str(exc.value)
+    assert 'docs/PROJECT-REFERENCE.md' in str(exc.value)
+
+
+def test_token_file_becomes_bearer_header(monkeypatch, tmp_path):
+    (tmp_path / '.config/bambu').mkdir(parents=True)
+    (tmp_path / '.config/bambu/token').write_text('example-token\n')
+    monkeypatch.setenv('HOME', str(tmp_path))
+    assert model_job.maker_headers()['Authorization'] == 'Bearer example-token'

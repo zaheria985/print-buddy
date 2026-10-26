@@ -15,10 +15,30 @@ import sys
 import time
 from pathlib import Path
 
-from . import settings
+from . import printers, settings
 
 HEARTBEAT_S = 30
 RUNTIME = "moonraker_event_listener"
+
+# The only vendor connection the Moonraker event listener serves (#256). The
+# listener is a Moonraker websocket client: its URL derives from
+# services.moonraker_url alone, and nothing under print_buddy/hermes speaks
+# OctoPrint. Every other connection (octoprint, offline, bambulab_lan,
+# flashforge_stock, and any future LAN connection) has no listener to run:
+# the container supervisor must not start it and the container healthcheck
+# must not require its heartbeat.
+LISTENER_CONNECTIONS = ("moonraker",)
+
+
+def listener_connection(data=None):
+    """Vendor connection of the configured printer model, e.g. 'moonraker'."""
+    data = settings.current() if data is None else data
+    return printers.MODELS[data["printer"]["model"]].vendor.connection
+
+
+def listener_required(data=None):
+    """True when the configured model's connection uses the Moonraker listener."""
+    return listener_connection(data) in LISTENER_CONNECTIONS
 
 
 def heartbeat_path(data=None):
