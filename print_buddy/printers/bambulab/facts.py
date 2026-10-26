@@ -58,12 +58,20 @@ A1 = {
     # The vendor profiles Print Buddy was checked against: SHA-256 of each profile above with its inherits and
     # includes resolved (profiles.sha256), from an installed OrcaSlicer. Hashes only, no profile content. A
     # different OrcaSlicer or vendor profile version is refused until it has been checked and added here.
+    # One checked vendor filament profile per base polymer (#264): slicing picks the one for the hardware record's
+    # material and refuses a material that has none. PLA is the default profile above. Bambu's ideal materials only.
+    "orca_filaments": Fact({"PLA": "Generic PLA @BBL A1", "PETG": "Generic PETG @BBL A1",
+                            "TPU": "Generic TPU @BBL A1", "PVA": "Generic PVA @BBL A1"}, "ORCA", True),
     "orca_identity": Fact(({
         "label": "OrcaSlicer 2.4.2 (BBL vendor profiles 02.01.00.19)",
         "vendor_version": "02.01.00.19",
         "sha256": {"machine": "41a75dfaca7903b95f3a9bc81fb8d1a8e6684c449f151e74963119f959e50a72",
                    "process": "7cfbed1af4c0310589fab4857a86eb83b84bd5db71f7d34bbe2201933b9c9f3c",
                    "filament": "dc7ed678c86bc8fb2bb5e61ff8264ed211dc9e25b50badd650bdd9bccd10e81e"},
+        # The other orca_filaments profiles, hashed the same way.
+        "filaments": {"Generic PETG @BBL A1": "eb5c733468d29eb92ae2f0176b65880a6880e1ccc38ea91cd7de9e536fffc4d4",
+                      "Generic TPU @BBL A1": "d30fd112cfbfdcc79e8946c6874354d20f41a72353e65566bf5888c1eaaea8c9",
+                      "Generic PVA @BBL A1": "1974432a9cc01611daea0b34759fb3284ae1aa4d204114b3ead8ee2ded28dc80"},
     },), "ORCA", True),
     # printable_area 0x0..256x256 and printable_height 256; Bambu also publishes 256 x 256 x 256 mm.
     "bed_mm": Fact((256.0, 256.0), "ORCA", True),
@@ -96,12 +104,18 @@ P1S = {
     "printer_model": Fact("Bambu Lab P1S", "ORCA", True),
     "orca_profiles": Fact({"machine": "Bambu Lab P1S 0.4 nozzle", "process": "0.20mm Standard @BBL X1C",
                            "filament": "Bambu PLA Basic @BBL X1C"}, "ORCA", True),
+    # As on the A1 (#264), from the same Bambu-branded X1C family as the default PLA profile; each lists the P1S.
+    "orca_filaments": Fact({"PLA": "Bambu PLA Basic @BBL X1C", "PETG": "Bambu PETG Basic @BBL X1C",
+                            "TPU": "Bambu TPU 95A @BBL X1C", "PVA": "Bambu PVA @BBL X1C"}, "ORCA", True),
     "orca_identity": Fact(({
         "label": "OrcaSlicer 2.4.2 (BBL vendor profiles 02.01.00.19)",
         "vendor_version": "02.01.00.19",
         "sha256": {"machine": "61c68e30dd084e185ec0cf75beab03195130dabf11702cacb168205770a4782f",
                    "process": "bc4e02dad296e7584bf12143276bbbe2debf73f390f7e6dd2ec2aeac9e3d3c14",
                    "filament": "ff10a3d1ad9e7ed43f5dec36996248b6abb934eed6692c480732670848e0a403"},
+        "filaments": {"Bambu PETG Basic @BBL X1C": "dbf3b8e6a26bd2a9202b97e3f0501219c4883caf639b950757050ef6a0004d60",
+                      "Bambu TPU 95A @BBL X1C": "e01de656a3c239354f989b625c0411f209f5779ed60c2190f0532cf5de0ee245",
+                      "Bambu PVA @BBL X1C": "619f13393e86b02f8613c8a9c5bf7cd79793a4262068f1355bb935765702dfcf"},
     },), "ORCA", True),
     "bed_mm": Fact((256.0, 256.0), "BAMBU", True),
     "max_print_height_mm": Fact(256.0, "BAMBU", True),

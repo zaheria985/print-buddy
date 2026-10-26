@@ -332,6 +332,10 @@ class PrinterAdapter(ABC):
             return settings.generated_templates_dir(self.model, self.config)
         return settings.ROOT / "print_buddy" / "templates" / "orca" / self.model.templates
 
+    def filament_template(self, templates: Path, material: str) -> Path:
+        """The filament template a job for material slices with; the template folder's filament.json by default."""
+        return Path(templates) / "filament.json"
+
     @abstractmethod
     def machine_start_gcode(self, template_start: str, mesh: str = "auto") -> str:
         """Orca machine_start_gcode for this printer; template_start is the template's own text."""

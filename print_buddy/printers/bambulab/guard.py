@@ -11,7 +11,9 @@ every executable line must be the next template line (placeholders match one tok
 must be present, so a vendor block cannot be edited, reordered, extended or cut short. The reference templates
 are generated on the operator's machine from their own OrcaSlicer (profiles.py) and trusted only while their
 flattened vendor profiles hash to an identity recorded in facts.py; an [orca] templates override is never the
-reference, and missing or unverified profiles refuse every file.
+reference, and missing or unverified profiles refuse every file. The filament blocks are checked against the
+verified filament profile the file names in filament_settings_id, which must be the checked profile for the
+material its filament_type declares (#264).
 """
 from __future__ import annotations
 
@@ -127,13 +129,22 @@ def vendor_block_problems(block, patterns, what):
     return problems
 
 
-def _templates(adapter):
+def _settings_id(text):
+    """The one filament profile name a sliced file says it used, or None."""
+    value = _config(text, "filament_settings_id")
+    if value is None or ";" in value:
+        return None
+    return value.strip().strip('"')
+
+
+def _templates(adapter, settings_id):
+    """(start blocks, end blocks, filament profile) from the verified templates the file says it was sliced with."""
     root = adapter.pinned_templates()
     machine = json.loads((root / "machine.json").read_text())
-    filament = json.loads((root / "filament.json").read_text())
+    filament = json.loads(profiles.filament_for_settings_id(adapter, settings_id, root).read_text())
     first = lambda v: v[0] if isinstance(v, list) else v  # noqa: E731
     return ((machine["machine_start_gcode"], first(filament.get("filament_start_gcode", ""))),
-            (first(filament.get("filament_end_gcode", "")), machine["machine_end_gcode"]))
+            (first(filament.get("filament_end_gcode", "")), machine["machine_end_gcode"]), filament)
 
 
 def gcode_problems(text, adapter, *, state=None):
@@ -164,13 +175,23 @@ def gcode_problems(text, adapter, *, state=None):
                         "bounds cannot be checked")
     else:
         prelude, body, epilogue = split
+        settings_id = _settings_id(text)
         try:
-            start, end = _templates(adapter)
+            if settings_id is None:
+                raise profiles.ProfileError(f"G-code must name exactly one filament_settings_id, got "
+                                            f"{_config(text, 'filament_settings_id')!r}")
+            start, end, profile = _templates(adapter, settings_id)
         except profiles.ProfileError as exc:
             problems.append(f"vendor start and end G-code cannot be checked: {exc}")
         else:
             problems += vendor_block_problems(prelude, template_patterns(*start), "start G-code")
             problems += vendor_block_problems(epilogue, template_patterns(*end), "end G-code")
+            # The filament profile must be the one for the material the file declares: PETG sliced with a PLA
+            # profile (its cooling, flow and filament G-code) is refused even when filament_type says PETG.
+            declared, kind = _config(text, "filament_type"), profiles._first(profile.get("filament_type"))
+            if declared and ";" not in declared and profiles.material_key(declared) != profiles.material_key(kind):
+                problems.append(f"G-code filament_type {declared!r} was sliced with the {kind} filament profile "
+                                f"{settings_id!r}; reslice with the {profiles.material_key(declared)} profile")
         tools = sorted({int(n) for n in re.findall(r"^[ \t]*T(\d+)\b", body, re.M)} - {0})
         if tools:
             problems.append(f"G-code changes to tools {tools}; {fact('ams')[0]} multi-color is not supported")

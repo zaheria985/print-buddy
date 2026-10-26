@@ -1,0 +1,14 @@
+{
+  "type": "filament",
+  "name": "Generic PVA @BBL A1",
+  "inherits": "fixture_filament_common",
+  "from": "system",
+  "instantiation": "true",
+  "filament_type": ["PVA"],
+  "filament_density": ["1.25"],
+  "nozzle_temperature": ["215"],
+  "nozzle_temperature_initial_layer": ["215"],
+  "filament_start_gcode": ["; fixture PVA filament start\nM900 K0.02\nM106 S0\n"],
+  "filament_end_gcode": ["; fixture PVA filament end\nM900 K0\n"],
+  "compatible_printers": ["Bambu Lab A1 0.4 nozzle"]
+}

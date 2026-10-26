@@ -17,8 +17,11 @@ HERMES = Path(tempfile.mkdtemp(prefix="a1-test-profile-"))
 
 def identity(resources=RESOURCES):
     upstream, version = profiles.flatten(resources, facts.A1["orca_profiles"].value)
+    names = set(facts.A1["orca_filaments"].value.values()) - {facts.A1["orca_profiles"].value["filament"]}
     return {"label": "Print Buddy test fixture (not OrcaSlicer)", "vendor_version": version,
-            "sha256": {kind: profiles.sha256(upstream[kind]) for kind in profiles.KINDS}}
+            "sha256": {kind: profiles.sha256(upstream[kind]) for kind in profiles.KINDS},
+            "filaments": {name: profiles.sha256(data)
+                          for name, data in profiles.flatten_filaments(resources, sorted(names)).items()}}
 
 
 def fixture_facts(resources=RESOURCES):

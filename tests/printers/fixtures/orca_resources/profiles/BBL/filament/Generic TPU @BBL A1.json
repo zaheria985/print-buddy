@@ -1,0 +1,14 @@
+{
+  "type": "filament",
+  "name": "Generic TPU @BBL A1",
+  "inherits": "fixture_filament_common",
+  "from": "system",
+  "instantiation": "true",
+  "filament_type": ["TPU"],
+  "filament_density": ["1.21"],
+  "nozzle_temperature": ["225"],
+  "nozzle_temperature_initial_layer": ["225"],
+  "filament_start_gcode": ["; fixture TPU filament start\nM900 K0\nM106 S0\n"],
+  "filament_end_gcode": ["; fixture TPU filament end\nM900 K0\n"],
+  "compatible_printers": ["Bambu Lab A1 0.4 nozzle"]
+}
