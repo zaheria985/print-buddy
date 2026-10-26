@@ -490,7 +490,7 @@ def test_other_printers_keep_the_whole_file_bounds_check(tmp_path):
     ({"nozzle": "0.6"}, "nozzle 0.6 mm has no Bambu Lab A1 template"),
     ({"nozzle_type": "brass"}, "nozzle type brass is not a Bambu Lab A1 hotend option"),
     ({"plate": "Cool Plate"}, "plate type must be 'Textured PEI Plate'"),
-    ({"generator": "BambuStudio 02.00.00.00"}, "only OrcaSlicer output is verified"),
+    ({"generator": "PrusaSlicer 2.8.1"}, "only OrcaSlicer and Bambu Studio output is accepted"),
 ])
 def test_material_nozzle_temperature_plate_and_slicer_limits(kwargs, message):
     found = problems(a1_gcode(**kwargs))
@@ -545,6 +545,20 @@ def test_the_a1_defaults_to_bambu_studio_and_may_pick_orca():
     assert MODEL.defaults()["printer"]["slicer"] == "bambu_studio"
     assert set(adapter_for(A1).verified_slicers) == {"bambu_studio", "orca"}
     assert config_for(A1, slicer="orca")["printer"]["slicer"] == "orca"
+
+
+@pytest.mark.parametrize("slicer, generator, binary", [
+    ("bambu_studio", "BambuStudio 02.02.02.56", "com.bambulab.BambuStudio"),
+    ("orca", "OrcaSlicer 2.4.2", "com.orcaslicer.OrcaSlicer"),
+])
+def test_either_slicer_choice_slices_and_passes_the_a1_guard(tmp_path, monkeypatch, slicer, generator, binary):
+    """[printer] slicer picks Bambu Studio (default) or OrcaSlicer; both run with the same verified profiles and
+    their output passes the same A1 guard. Only the chosen slicer runs."""
+    cfg = config_for(A1, slicer=slicer)
+    out, provenance, folder, calls = fake_slice(tmp_path, monkeypatch, a1_gcode(generator=generator), config=cfg)
+    assert len(calls) == 1 and binary in " ".join(calls[0])
+    assert provenance["slice_guard"]["status"] in ("ok", "warnings")
+    assert adapter_for(A1).gcode_problems(out.read_text()) == []
 
 
 def _box(path, w, d, h):
