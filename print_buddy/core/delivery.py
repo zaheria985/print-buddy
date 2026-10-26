@@ -14,13 +14,16 @@ refused, not sent.
 from __future__ import annotations
 
 import hashlib
+import logging
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from .. import printers, settings
 from ..printers.base import start_code_problems
+from . import plate_thumbnail
 
+logger = logging.getLogger(__name__)
 PRINTER, DISCORD, BAMBU_HANDOFF = "printer", "discord", "bambu_handoff"
 LABELS = {
     DISCORD: "Send the files here",
@@ -186,16 +189,23 @@ def _slice_info(plate, nozzle_mm):
             f'  <metadata key="nozzle_diameters" value="{float(nozzle_mm):g}"/>\n </plate>\n</config>\n')
 
 
-def bambu_package(gcode, target, plate=1, nozzle_mm=0.4):
+# Preview roles -> Bambu Studio's file names for plate n. slice_info.config does not reference them:
+# the printer, Bambu Handy and Studio read the plate previews by these names.
+_THUMBNAIL_NAMES = {"plate": "Metadata/plate_{n}.png", "plate_small": "Metadata/plate_{n}_small.png"}
+
+
+def bambu_package(gcode, target, plate=1, nozzle_mm=0.4, thumbnails=None):
     """Write a .gcode.3mf holding one plate's G-code, in the layout Bambu Studio exports.
 
     Metadata/plate_<n>.gcode with its MD5 in Metadata/plate_<n>.gcode.md5, a slice_info.config naming
-    the plate, and an empty 3D model. Built offline from the validated G-code; not yet verified on
-    Bambu hardware (see docs/PRINTER-PROFILES.md).
+    the plate, an empty 3D model and, when `thumbnails` (plate_thumbnail.Thumbnails or its images dict)
+    holds them, the plate previews plate_<n>.png (512 px) and plate_<n>_small.png (128 px) (#275). Built
+    offline from the validated G-code; not yet verified on Bambu hardware (see docs/BAMBU-LAB.md).
     """
     raw = Path(gcode).read_bytes()
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
+    images = getattr(thumbnails, "images", thumbnails) or {}
     entries = [
         ("[Content_Types].xml", _CONTENT_TYPES.encode()),
         ("_rels/.rels", _RELS.encode()),
@@ -203,7 +213,7 @@ def bambu_package(gcode, target, plate=1, nozzle_mm=0.4):
         (f"Metadata/plate_{int(plate)}.gcode", raw),
         (f"Metadata/plate_{int(plate)}.gcode.md5", hashlib.md5(raw).hexdigest().upper().encode()),
         ("Metadata/slice_info.config", _slice_info(plate, nozzle_mm).encode()),
-    ]
+    ] + [(name.format(n=int(plate)), images[role]) for role, name in _THUMBNAIL_NAMES.items() if images.get(role)]
     tmp = target.with_name(target.name + ".part")
     with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, data in entries:
@@ -239,8 +249,20 @@ def bambu_handoff(job, gcodes, config=None):
             raise DeliveryRefused("; ".join(problems) + "; no Bambu package was made")
         target = gcode.parent / "bambu" / (gcode.name[:-len(".gcode")] if gcode.name.endswith(".gcode")
                                            else gcode.stem)
-        packages.append(bambu_package(gcode, target.with_name(target.name + ".gcode.3mf"), index, nozzle))
+        packages.append(bambu_package(gcode, target.with_name(target.name + ".gcode.3mf"), index, nozzle,
+                                      _thumbnails(gcode, job, config, text)))
     return packages
+
+
+def _thumbnails(gcode, job, config, text):
+    """Plate previews for one G-code, or none: a preview problem never blocks a validated delivery."""
+    try:
+        found = plate_thumbnail.plate_thumbnails(gcode, job, config["printer"].get("bed_mm"), text)
+    except Exception as exc:  # noqa: BLE001  cosmetic: log, package without previews
+        logger.warning("bambu package: no plate preview for %s: %s", gcode.name, exc)
+        return None
+    logger.info("bambu package: plate preview for %s: %s", gcode.name, found.source)
+    return found
 
 
 def handoff_note(model):

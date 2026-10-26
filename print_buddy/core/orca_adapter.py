@@ -551,11 +551,15 @@ FLEX_PROFILE = {
     'ironing_type': 'no ironing', 'fuzzy_skin': 'none',
 }
 
+# Designer intent carried from a 3MF's project settings over the printer template. Support keys: the
+# switch and type, plus where supports go (overhang threshold, style, critical-regions-only, small
+# overhang removal, build-plate-only); support filaments, speeds and Z gaps stay the template's (#275).
 PROCESS_KEYS = ('layer_height', 'initial_layer_print_height', 'wall_loops', 'sparse_infill_density',
                 'sparse_infill_pattern', 'brim_type', 'brim_width', 'brim_object_gap', 'enable_support',
-                'support_type', 'support_on_build_plate_only', 'top_shell_layers', 'bottom_shell_layers',
-                'top_shell_thickness', 'bottom_shell_thickness', 'gap_fill_target', 'filter_out_gap_fill',
-                'wall_generator')
+                'support_type', 'support_style', 'support_threshold_angle', 'support_critical_regions_only',
+                'support_remove_small_overhang', 'support_on_build_plate_only', 'top_shell_layers',
+                'bottom_shell_layers', 'top_shell_thickness', 'bottom_shell_thickness', 'gap_fill_target',
+                'filter_out_gap_fill', 'wall_generator')
 
 
 RANGE_ERROR = re.compile(r'^(\w+): (\S+) not in range \[([-0-9.eE+]+),([-0-9.eE+]+)\]', re.M)

@@ -122,7 +122,7 @@ After **Slice only**:
 - **More options enabled**: one menu with the options the profile enables:
   - **Start next plate · bed is clear**: the same per-job bed-clear button, and still the only way to print. It runs every existing print-now gate.
   - **Send the files here** (`discord`): attaches each plate's file to the thread.
-  - **Package for Bambu (no upload)** (`bambu_handoff`): builds a `.gcode.3mf` per plate.
+  - **Package for Bambu (no upload)** (`bambu_handoff`): builds a `.gcode.3mf` per plate, with the plate preview PNGs the printer and the Bambu apps show (#275).
   - **Done, don't print**
 
   After a delivery the menu returns without that option ("Anything else for this slice?"). Each method runs to completion at most once per slice.
@@ -147,7 +147,7 @@ Every file is one message with one `MEDIA:` attachment, labelled "Plate n of m".
 |---|---|
 | Vendor profile, settings, delivery options | Implemented. Printer profiles: A1, A1 mini, P1P, P1S, P2S, X1, X1 Carbon, X1E, H2S (every single-nozzle model); LAN status/upload/start are opt-in (see BAMBU-LAB.md) |
 | Start-code guard | Implemented. After slicing, and again before packaging, every G-code line for a Bambu printer must be a plain G, M or T code. Klipper or ZMod macros (`PRINT_START`, `START_PRINT ... MESH=`, `CHANGE_ZCOLOR`, `LOAD_ZOFFSET`, `BED_MESH_*`) block the slice or the package |
-| `.gcode.3mf` packaging | Implemented, offline and deterministic. Contents: `Metadata/plate_<n>.gcode`, its upper-case MD5 in `Metadata/plate_<n>.gcode.md5`, `Metadata/slice_info.config` with the plate index and nozzle, and an empty `3D/3dmodel.model`, laid out the way Bambu Studio exports a sliced plate. **Not yet verified on Bambu hardware or in Bambu Studio.** Thumbnails and `printer_model_id` are not written |
+| `.gcode.3mf` packaging | Implemented, offline and deterministic. Contents: `Metadata/plate_<n>.gcode`, its upper-case MD5 in `Metadata/plate_<n>.gcode.md5`, `Metadata/slice_info.config` with the plate index and nozzle, and an empty `3D/3dmodel.model`, plus the plate previews `Metadata/plate_<n>.png` (512 px) and `Metadata/plate_<n>_small.png` (128 px) from Orca's embedded thumbnail or an offline render of the sliced geometry (#275; `top_<n>.png` and `pick_<n>.png` are not written), laid out the way Bambu Studio exports a sliced plate. **Not yet verified on Bambu hardware or in Bambu Studio.** `printer_model_id` is not written |
 | Discord delivery | Implemented. Bambu Lab's primary format is `.gcode.3mf`, so "Send the files here" sends the packages |
 | Bambu Studio as the primary slicer | Implemented, opt-in with `printer.slicer: bambu_studio`, allowed only by the Bambu Lab profile. Runs the configured `[bambu] command` (Flathub Bambu Studio with `--unshare=network`) with the same CLI flags as the existing fallback: `--datadir`, `--load-settings`, `--load-filaments`, `--arrange`/`--orient`, `--slice 0`, `--outputdir`. Orca is not run and there is no fallback. Every Print Buddy guard still applies to its output. The real-slicer CI job covers OrcaSlicer only, so this path is tested with a mocked CLI |
 | LAN upload | Implemented opt-in (#187 stage c): FTPS upload with size readback, used by the gated LAN print path. Cloud upload is unsupported. Read-only LAN MQTT *status* is separate — see the telemetry row in [BAMBU-LAB](BAMBU-LAB.md) |
